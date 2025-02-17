@@ -15,21 +15,30 @@ from utils import get_config, shape_to_np
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
 class Detector:
-    def __init__(self, output_size=512, show_stream=True, show_output=True, show_markers=False):
+    def __init__(self, output_size=512, show_stream=True, show_output=True, show_markers=False, gpu=0):
+        print("Starting face detector...")
+        self.output_size = output_size
+        self.show_stream = show_stream
+        self.show_output = show_output
+        self.show_markers = show_markers
+        self.face_img = np.zeros((output_size, output_size, 3))
+        self.face_align_img = np.zeros((output_size, output_size, 3))
+        self.l_eye_img = np.zeros((output_size, output_size, 3))
+        self.r_eye_img = np.zeros((output_size, output_size, 3))
+        self.head_pos = np.ones((output_size, output_size))
+        self.head_angle = 0.0
+
+        dlib.cuda.set_device(gpu)
+        self.landmark_idx = OrderedDict([("right_eye", (0, 2)), ("left_eye", (2, 4))])
+        self.detector = dlib.cnn_face_detection_model_v1("models/mmod_human_face_detector.dat")
+        self.predictor = dlib.shape_predictor("models/shape_predictor_5_face_landmarks.dat")
+
         # Threaded webcam capture
         self.capture = cv2.VideoCapture(0)
         self.q = queue.Queue()
         t = threading.Thread(target=self._reader)
         t.daemon = True
         t.start()
-        self.landmark_idx = OrderedDict([("right_eye", (0, 2)), ("left_eye", (2, 4))])
-        self.detector = dlib.cnn_face_detection_model_v1("../models/mmod_human_face_detector.dat")
-        self.predictor = dlib.shape_predictor("../models/shape_predictor_5_face_landmarks.dat")
-        self.output_size = output_size
-        self.show_stream = show_stream
-        self.show_output = show_output
-        self.show_markers = show_markers
-        self.captured_frame = None  # To store the captured frame
 
     def _reader(self):
         while True:
@@ -70,26 +79,18 @@ class Detector:
             if self.show_markers:
                 for point in l_eye_pts:
                     cv2.circle(frame, (point[0], point[1]), 1, COLOURS["blue"], -1)
-
                 for point in r_eye_pts:
                     cv2.circle(frame, (point[0], point[1]), 1, COLOURS["blue"], -1)
-
-                cv2.circle(
-                    frame, (l_eye_center[0], l_eye_center[1]), 3, COLOURS["green"], 1
-                )
-                cv2.circle(
-                    frame, (r_eye_center[0], r_eye_center[1]), 3, COLOURS["green"], 1
-                )
+                cv2.circle(frame, (l_eye_center[0], l_eye_center[1]), 3, COLOURS["green"], 1)
+                cv2.circle(frame, (r_eye_center[0], r_eye_center[1]), 3, COLOURS["green"], 1)
 
             # Face extraction and alignment
             desired_l_eye_pos = (0.35, 0.5)
             desired_r_eye_posx = 1.0 - desired_l_eye_pos[0]
-
             desired_dist = desired_r_eye_posx - desired_l_eye_pos[0]
             desired_dist *= self.output_size
             scale = desired_dist / eye_dist
 
-            # Convert eyes_center to a tuple of floats
             eyes_center = (
                 float((l_eye_center[0] + r_eye_center[0]) // 2),
                 float((l_eye_center[1] + r_eye_center[1]) // 2),
@@ -119,60 +120,67 @@ class Detector:
             # Get eyes (square regions based on eye width)
             try:
                 l_eye_img = frame[
-                    l_eye_center[1]
-                    - int(l_eye_width / 2) : l_eye_center[1]
-                    + int(l_eye_width / 2),
-                    l_eye_pts[0][0] : l_eye_pts[1][0],
-                ]
-                self.l_eye_img = cv2.resize(
-                    l_eye_img, (self.output_size, self.output_size)
-                )
+                            l_eye_center[1] - int(l_eye_width / 2): l_eye_center[1] + int(l_eye_width / 2),
+                            l_eye_pts[0][0]: l_eye_pts[1][0],
+                            ]
+                self.l_eye_img = cv2.resize(l_eye_img, (self.output_size, self.output_size))
 
                 r_eye_img = frame[
-                    r_eye_center[1]
-                    - int(r_eye_width / 2) : r_eye_center[1]
-                    + int(r_eye_width / 2),
-                    r_eye_pts[1][0] : r_eye_pts[0][0],
-                ]
-                self.r_eye_img = cv2.resize(
-                    r_eye_img, (self.output_size, self.output_size)
-                )
+                            r_eye_center[1] - int(r_eye_width / 2): r_eye_center[1] + int(r_eye_width / 2),
+                            r_eye_pts[1][0]: r_eye_pts[0][0],
+                            ]
+                self.r_eye_img = cv2.resize(r_eye_img, (self.output_size, self.output_size))
             except:
                 pass
 
-            # Store the processed frame
-            self.captured_frame = frame
+            frame_bw = np.ones((frame.shape[0], frame.shape[1])) * 255
+            cv2.rectangle(
+                frame_bw,
+                (dets[0].rect.left(), dets[0].rect.top()),
+                (dets[0].rect.right(), dets[0].rect.bottom()),
+                COLOURS["black"],
+                -1,
+            )
+            self.head_pos = cv2.resize(frame_bw, (self.output_size, self.output_size))
+
+            if self.show_output:
+                cv2.imshow("Head position", self.head_pos)
+                cv2.imshow(
+                    "Face and eyes",
+                    np.vstack(
+                        (
+                            np.hstack((self.face_img, self.face_align_img)),
+                            np.hstack((self.l_eye_img, self.r_eye_img)),
+                        )
+                    ),
+                )
+
+            if self.show_stream:
+                cv2.imshow("Webcam", frame)
+
+        return (
+            self.l_eye_img,
+            self.r_eye_img,
+            self.face_img,
+            self.face_align_img,
+            self.head_pos,
+            self.head_angle,
+        )
 
     def close(self):
+        print("Closing face detector...")
         self.capture.release()
         cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
     detector = Detector(
-        output_size=512, show_stream=True, show_output=True, show_markers=True
+        output_size=512, show_stream=True, show_output=True, show_markers=False
     )
 
     while True:
-        # Display the live stream
-        if detector.show_stream:
-            frame = detector.q.get()
-            cv2.imshow("Stream", frame)
-
-        # Check for key press
-        key = cv2.waitKey(1)
-        if key == 27:  # Escape key to exit
+        if cv2.waitKey(1) & 0xFF == 27:  # wait for escape key
             break
-        elif key == 32:  # Spacebar to capture a frame
-            detector.get_frame()  # Process the current frame
-            if detector.captured_frame is not None:
-                # Display the captured frame with detections
-                cv2.imshow("Captured Frame", detector.captured_frame)
-                if hasattr(detector, 'face_img'):
-                    cv2.imshow("Aligned Face", detector.face_img)
-                if hasattr(detector, 'l_eye_img'):
-                    cv2.imshow("Left Eye", detector.l_eye_img)
-                if hasattr(detector, 'r_eye_img'):
-                    cv2.imshow("Right Eye", detector.r_eye_img)
+        detector.get_frame()
 
     detector.close()
