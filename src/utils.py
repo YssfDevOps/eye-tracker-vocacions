@@ -3,15 +3,21 @@ import random
 import json
 import datetime
 import itertools
+import cv2
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import mediapipe as mp
 
 from pathlib import Path
 from collections import OrderedDict
 from configparser import ConfigParser
 from scipy.interpolate import griddata
 from sklearn.model_selection import train_test_split
+
+mp_drawing = mp.solutions.drawing_utils
+mp_face_mesh = mp.solutions.face_mesh
+drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
 
 
 def get_config(path="config.ini", comment_char=";"):
@@ -38,6 +44,88 @@ def shape_to_np(shape, dtype="int"):
     for i in range(0, 5):
         coords[i] = (shape.part(i).x, shape.part(i).y)
     return coords
+
+
+# Crop the right eye region
+def getRightEye(image, landmarks, eye_center):
+    eye_top = int(landmarks[263].y * image.shape[0])
+    eye_left = int(landmarks[362].x * image.shape[1])
+    eye_bottom = int(landmarks[374].y * image.shape[0])
+    eye_right = int(landmarks[263].x * image.shape[1])
+    eye_width = eye_right - eye_left
+
+    top = eye_center[1] - int(eye_width / 2)
+    bottom = eye_center[1] + int(eye_width / 2)
+
+    eye_img = image[
+              top:bottom,
+              eye_left:eye_right
+              ]
+    return eye_img
+
+
+# Get the right eye coordinates on the actual -> to visualize the bbox
+def getRightEyeRect(image, landmarks):
+    eye_top = int(landmarks[257].y * image.shape[0])
+    eye_left = int(landmarks[362].x * image.shape[1])
+    eye_bottom = int(landmarks[374].y * image.shape[0])
+    eye_right = int(landmarks[263].x * image.shape[1])
+
+    cloned_image = image.copy()
+    cropped_right_eye = cloned_image[eye_top:eye_bottom, eye_left:eye_right]
+    h, w, _ = cropped_right_eye.shape
+    x = eye_left
+    y = eye_top
+    return x, y, w, h
+
+
+def getLeftEye(image, landmarks, eye_center):
+    eye_top = int(landmarks[159].y * image.shape[0])
+    eye_left = int(landmarks[33].x * image.shape[1])
+    eye_bottom = int(landmarks[145].y * image.shape[0])
+    eye_right = int(landmarks[133].x * image.shape[1])
+    eye_width = eye_right - eye_left
+
+    top = eye_center[1] - int(eye_width / 2)
+    bottom = eye_center[1] + int(eye_width / 2)
+
+    eye_img = image[
+              top:bottom,
+              eye_left:eye_right
+              ]
+    return eye_img
+
+
+def getLeftEyeRect(image, landmarks):
+    # eye_left landmarks (27, 23, 130, 133) ->? how to utilize z info
+    eye_top = int(landmarks[159].y * image.shape[0])
+    eye_left = int(landmarks[33].x * image.shape[1])
+    eye_bottom = int(landmarks[145].y * image.shape[0])
+    eye_right = int(landmarks[133].x * image.shape[1])
+
+    cloned_image = image.copy()
+    cropped_left_eye = cloned_image[eye_top:eye_bottom, eye_left:eye_right]
+    h, w, _ = cropped_left_eye.shape
+
+    x = eye_left
+    y = eye_top
+    return x, y, w, h
+
+
+# Draw the face mesh annotations on the image.
+def drawFaceMesh(image, results):
+    image.flags.writeable = True
+    # image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            #         print('face landmarks', face_landmarks)
+            mp_drawing.draw_landmarks(
+                image=image,
+                landmark_list=face_landmarks,
+                connections=mp_face_mesh.FACEMESH_CONTOURS,
+                landmark_drawing_spec=drawing_spec,
+                connection_drawing_spec=drawing_spec)
+        cv2.imshow('MediaPipe FaceMesh', image)
 
 
 def bgr_to_rgb(img):
@@ -80,8 +168,8 @@ def plot_region_map(path, region_map, map_scale, cmap="inferno"):
 
 def get_calibration_zones(w, h, target_radius):
     """Get coordinates for 9 point calibration"""
-    xs = (0 + target_radius, w // 2, w - target_radius)
-    ys = (0 + target_radius, h // 2, h - target_radius)
+    xs = (0 + target_radius, w / 2, w - target_radius)
+    ys = (0 + target_radius, h / 2, h - target_radius)
     zones = list(itertools.product(xs, ys))
     random.shuffle(zones)
     return zones
@@ -94,48 +182,11 @@ def get_undersampled_region(region_map, map_scale):
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
 
 
-
-def dir_name_string(trial):
-    name = str(trial.experiment_tag)
-
-    if len(name) > 100:
-        return name[:100]
-    else:
-        return name
-
-
-
-
-def get_tune_results(analysis):
-    """Get results from single experiment"""
-
-    if analysis.best_checkpoint:
-        print(f"Directory: {analysis.best_checkpoint}")
-    else:
-        print(f"Directory: {analysis.best_logdir}")
-
-    print(f"Loss: {round(analysis.best_result['loss'],2)}")
-    print(f"Pixel error: {round(np.sqrt(analysis.best_result['loss']),2)}")
-    print("Hyperparameters...")
-    for hparam in analysis.best_config:
-        print(f"- {hparam}: {analysis.best_config[hparam]}")
-
-
-
-def save_model(model, config, path_weights, path_config):
-    """Save trained torch weights with config"""
-    torch.save(model.state_dict(), path_weights)
-
-    with open(path_config, "w") as fp:
-        json.dump(config, fp, indent=4)
-
-
-
 def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
     """Plot prediction errors over screen space"""
     # create grid
-    xi = np.arange(0, 1920, 1)
-    yi = np.arange(0, 1080, 1)
+    xi = np.arange(0, 2560, 1)
+    yi = np.arange(0, 1440, 1)
     xi, yi = np.meshgrid(xi, yi)
 
     # interpolate

@@ -6,16 +6,30 @@ import queue
 import threading
 import torch
 import numpy as np
+import mediapipe as mp
 
 from collections import OrderedDict
 from torchvision import transforms
-from utils import get_config, shape_to_np
+from utils import get_config, shape_to_np, drawFaceMesh, getLeftEye, getRightEye
 
 # Read config.ini file
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
+LEFT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+LEFT_IRIS = [474, 475, 476, 477]
+RIGHT_IRIS = [469, 470, 471, 472]
+
+
 class Detector:
-    def __init__(self, output_size=512, show_stream=True, show_output=True, show_markers=False, gpu=0):
+    def __init__(
+            self,
+            output_size,
+            show_stream=False,
+            show_markers=False,
+            show_output=False,
+            gpu=0
+    ):
         print("Starting face detector...")
         self.output_size = output_size
         self.show_stream = show_stream
@@ -28,13 +42,23 @@ class Detector:
         self.head_pos = np.ones((output_size, output_size))
         self.head_angle = 0.0
 
-        dlib.cuda.set_device(gpu)
-        self.landmark_idx = OrderedDict([("right_eye", (0, 2)), ("left_eye", (2, 4))])
-        self.detector = dlib.cnn_face_detection_model_v1("models/mmod_human_face_detector.dat")
-        self.predictor = dlib.shape_predictor("models/shape_predictor_5_face_landmarks.dat")
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.drawing_spec = self.mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
+
+        # create face mesh
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
 
         # Threaded webcam capture
-        self.capture = cv2.VideoCapture(0)
+        self.capture = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.capture.set(cv2.CAP_PROP_FPS, 30)
         self.q = queue.Queue()
         t = threading.Thread(target=self._reader)
         t.daemon = True
@@ -47,30 +71,35 @@ class Detector:
                 break
             if not self.q.empty():
                 try:
-                    self.q.get_nowait()
+                    self.q.get_nowait()  # discard previous (unprocessed) frame
                 except queue.Empty:
                     pass
             self.q.put(frame)
 
     def get_frame(self):
+
         frame = self.q.get()
-        dets = self.detector(frame, 0)
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_h, img_w = frame.shape[:2]
+        results = self.face_mesh.process(rgb_frame)
 
-        if len(dets) == 1:
+        if results.multi_face_landmarks:
+            landmarks = results.multi_face_landmarks[0].landmark
             # Get feature locations
-            features = self.predictor(frame, dets[0].rect)
-            reshaped = shape_to_np(features)
+            mesh_points = np.array(
+                [np.multiply([p.x, p.y], [img_w, img_h]).astype(int) for p in results.multi_face_landmarks[0].landmark])
 
-            l_start, l_end = self.landmark_idx["left_eye"]
-            r_start, r_end = self.landmark_idx["right_eye"]
-            l_eye_pts = reshaped[l_start:l_end]
-            r_eye_pts = reshaped[r_start:r_end]
-            l_eye_width = l_eye_pts[1][0] - l_eye_pts[0][0]
-            r_eye_width = r_eye_pts[0][0] - r_eye_pts[1][0]
+            l_eye_pts = mesh_points[RIGHT_EYE]
+            r_eye_pts = mesh_points[LEFT_EYE]
+            l_iris_pts = mesh_points[LEFT_IRIS]
+            r_iris_pts = mesh_points[RIGHT_IRIS]
 
             # Calculate eye centers and head angle
             l_eye_center = l_eye_pts.mean(axis=0).astype("int")
             r_eye_center = r_eye_pts.mean(axis=0).astype("int")
+            l_iris_center = l_iris_pts.mean(axis=0).astype("int")
+            r_iris_center = r_iris_pts.mean(axis=0).astype("int")
             eye_dist = np.linalg.norm(r_eye_center - l_eye_center)
             dY = r_eye_center[1] - l_eye_center[1]
             dX = r_eye_center[0] - l_eye_center[0]
@@ -79,21 +108,25 @@ class Detector:
             if self.show_markers:
                 for point in l_eye_pts:
                     cv2.circle(frame, (point[0], point[1]), 1, COLOURS["blue"], -1)
+
                 for point in r_eye_pts:
                     cv2.circle(frame, (point[0], point[1]), 1, COLOURS["blue"], -1)
-                cv2.circle(frame, (l_eye_center[0], l_eye_center[1]), 3, COLOURS["green"], 1)
-                cv2.circle(frame, (r_eye_center[0], r_eye_center[1]), 3, COLOURS["green"], 1)
+
+                # iris
+                cv2.circle(frame, (l_iris_center[0], l_iris_center[1]), 3, COLOURS["green"], 1)
+                cv2.circle(frame, (r_iris_center[0], r_iris_center[1]), 3, COLOURS["green"], 1)
 
             # Face extraction and alignment
             desired_l_eye_pos = (0.35, 0.5)
             desired_r_eye_posx = 1.0 - desired_l_eye_pos[0]
+
             desired_dist = desired_r_eye_posx - desired_l_eye_pos[0]
             desired_dist *= self.output_size
             scale = desired_dist / eye_dist
 
-            eyes_center = (
-                float((l_eye_center[0] + r_eye_center[0]) // 2),
-                float((l_eye_center[1] + r_eye_center[1]) // 2),
+            eyeCenter = (
+                (l_eye_center[0] + r_eye_center[0]) / 2,
+                (l_eye_center[1] + r_eye_center[1]) / 2,
             )
 
             t_x = self.output_size * 0.5
@@ -101,9 +134,9 @@ class Detector:
 
             align_angles = (0, self.head_angle)
             for angle in align_angles:
-                M = cv2.getRotationMatrix2D(eyes_center, angle, scale)
-                M[0, 2] += t_x - eyes_center[0]
-                M[1, 2] += t_y - eyes_center[1]
+                M = cv2.getRotationMatrix2D(eyeCenter, angle, scale)
+                M[0, 2] += t_x - eyeCenter[0]
+                M[1, 2] += t_y - eyeCenter[1]
 
                 aligned = cv2.warpAffine(
                     frame,
@@ -117,30 +150,40 @@ class Detector:
                 else:
                     self.face_align_img = aligned
 
-            # Get eyes (square regions based on eye width)
             try:
-                l_eye_img = frame[
-                            l_eye_center[1] - int(l_eye_width / 2): l_eye_center[1] + int(l_eye_width / 2),
-                            l_eye_pts[0][0]: l_eye_pts[1][0],
-                            ]
-                self.l_eye_img = cv2.resize(l_eye_img, (self.output_size, self.output_size))
-
-                r_eye_img = frame[
-                            r_eye_center[1] - int(r_eye_width / 2): r_eye_center[1] + int(r_eye_width / 2),
-                            r_eye_pts[1][0]: r_eye_pts[0][0],
-                            ]
-                self.r_eye_img = cv2.resize(r_eye_img, (self.output_size, self.output_size))
+                self.l_eye_img = getLeftEye(frame, landmarks, l_eye_center)
+                self.l_eye_img = cv2.resize(
+                    self.l_eye_img, (self.output_size, self.output_size)
+                )
+                self.r_eye_img = getRightEye(frame, landmarks, r_eye_center)
+                self.r_eye_img = cv2.resize(
+                    self.r_eye_img, (self.output_size, self.output_size)
+                )
             except:
                 pass
 
+            # Get position of head in the frame
             frame_bw = np.ones((frame.shape[0], frame.shape[1])) * 255
-            cv2.rectangle(
-                frame_bw,
-                (dets[0].rect.left(), dets[0].rect.top()),
-                (dets[0].rect.right(), dets[0].rect.bottom()),
-                COLOURS["black"],
-                -1,
-            )
+
+            # create a rect around the face
+            for face_landmarks in results.multi_face_landmarks:
+                h, w, c = frame.shape
+                cx_min = w
+                cy_min = h
+                cx_max = cy_max = 0
+                for id, lm in enumerate(face_landmarks.landmark):
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    if cx < cx_min:
+                        cx_min = cx
+                    if cy < cy_min:
+                        cy_min = cy
+                    if cx > cx_max:
+                        cx_max = cx
+                    if cy > cy_max:
+                        cy_max = cy
+                # draw black rect
+                cv2.rectangle(frame_bw, (cx_min, cy_min), (cx_max, cy_max), 0, -1)
+
             self.head_pos = cv2.resize(frame_bw, (self.output_size, self.output_size))
 
             if self.show_output:
@@ -175,7 +218,7 @@ class Detector:
 
 if __name__ == "__main__":
     detector = Detector(
-        output_size=512, show_stream=True, show_output=True, show_markers=False
+        output_size=512, show_stream=False, show_output=True, show_markers=False
     )
 
     while True:
