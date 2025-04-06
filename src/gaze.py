@@ -15,26 +15,15 @@ from utils import get_config, shape_to_np, drawFaceMesh, getLeftEye, getRightEye
 # Read config.ini file
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
-LEFT_EYE = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
-RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
-LEFT_IRIS = [474, 475, 476, 477]
-RIGHT_IRIS = [469, 470, 471, 472]
-
-
 class Detector:
-    def __init__(
-            self,
-            output_size,
-            show_stream=False,
-            show_markers=False,
-            show_output=False,
-            gpu=0
-    ):
+    def __init__(self, output_size, show_stream=False, show_markers=False, show_output=False):
+
         print("Starting face detector...")
         self.output_size = output_size
         self.show_stream = show_stream
-        self.show_output = show_output
         self.show_markers = show_markers
+        self.show_output = show_output
+
         self.face_img = np.zeros((output_size, output_size, 3))
         self.face_align_img = np.zeros((output_size, output_size, 3))
         self.l_eye_img = np.zeros((output_size, output_size, 3))
@@ -46,13 +35,22 @@ class Detector:
         self.mp_face_mesh = mp.solutions.face_mesh
         self.drawing_spec = self.mp_drawing.DrawingSpec(thickness=1, circle_radius=1)
 
-        # create face mesh
+        # Create face mesh
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             max_num_faces=1,
             refine_landmarks=True,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
+
+        # Load landmarks from JSON
+        with open('./landmarks.json', 'r') as f:
+            landmarks = json.load(f)
+
+        self.LEFT_EYE = landmarks["LEFT_EYE"]
+        self.RIGHT_EYE = landmarks["RIGHT_EYE"]
+        self.LEFT_IRIS = landmarks["LEFT_IRIS"]
+        self.RIGHT_IRIS = landmarks["RIGHT_IRIS"]
 
         # Threaded webcam capture
         self.capture = cv2.VideoCapture(1, cv2.CAP_DSHOW)
@@ -86,14 +84,15 @@ class Detector:
 
         if results.multi_face_landmarks:
             landmarks = results.multi_face_landmarks[0].landmark
+
             # Get feature locations
             mesh_points = np.array(
                 [np.multiply([p.x, p.y], [img_w, img_h]).astype(int) for p in results.multi_face_landmarks[0].landmark])
 
-            l_eye_pts = mesh_points[RIGHT_EYE]
-            r_eye_pts = mesh_points[LEFT_EYE]
-            l_iris_pts = mesh_points[LEFT_IRIS]
-            r_iris_pts = mesh_points[RIGHT_IRIS]
+            l_eye_pts = mesh_points[self.RIGHT_EYE]
+            r_eye_pts = mesh_points[self.LEFT_EYE]
+            l_iris_pts = mesh_points[self.LEFT_IRIS]
+            r_iris_pts = mesh_points[self.RIGHT_IRIS]
 
             # Calculate eye centers and head angle
             l_eye_center = l_eye_pts.mean(axis=0).astype("int")
@@ -165,7 +164,7 @@ class Detector:
             # Get position of head in the frame
             frame_bw = np.ones((frame.shape[0], frame.shape[1])) * 255
 
-            # create a rect around the face
+            # Create a rectangle around the face
             for face_landmarks in results.multi_face_landmarks:
                 h, w, c = frame.shape
                 cx_min = w
@@ -181,7 +180,7 @@ class Detector:
                         cx_max = cx
                     if cy > cy_max:
                         cy_max = cy
-                # draw black rect
+                # Draw black rect
                 cv2.rectangle(frame_bw, (cx_min, cy_min), (cx_max, cy_max), 0, -1)
 
             self.head_pos = cv2.resize(frame_bw, (self.output_size, self.output_size))
@@ -201,14 +200,7 @@ class Detector:
             if self.show_stream:
                 cv2.imshow("Webcam", frame)
 
-        return (
-            self.l_eye_img,
-            self.r_eye_img,
-            self.face_img,
-            self.face_align_img,
-            self.head_pos,
-            self.head_angle,
-        )
+        return self.l_eye_img, self.r_eye_img, self.face_img, self.face_align_img, self.head_pos, self.head_angle
 
     def close(self):
         print("Closing face detector...")

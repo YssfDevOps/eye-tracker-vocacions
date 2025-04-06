@@ -9,8 +9,8 @@ import numpy as np
 from collections import deque
 from scipy.stats import beta
 from pygame.locals import *
-from Target import Target
-from Gaze import Detector
+from target import Target
+from gaze import Detector
 from utils import (
     get_config,
     bgr_to_rgb,
@@ -24,13 +24,7 @@ from utils import (
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
 # Setup directories
-data_dirs = (
-    "data/l_eye",
-    "data/r_eye",
-    "data/face",
-    "data/face_aligned",
-    "data/head_pos",
-)
+data_dirs = ("data/l_eye", "data/r_eye", "data/face", "data/face_aligned", "data/head_pos")
 
 for d in data_dirs:
     if not os.path.exists(d):

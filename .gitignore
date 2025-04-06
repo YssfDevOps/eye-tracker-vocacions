@@ -3,6 +3,9 @@
 *.iml
 *.ipr
 *.iws
+data
+logs
+media
 
 # Python specific files
 __pycache__/

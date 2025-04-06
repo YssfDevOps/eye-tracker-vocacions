@@ -7,13 +7,22 @@ import cv2
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import pytorch_lightning as pl
 import mediapipe as mp
 
 from pathlib import Path
 from collections import OrderedDict
 from configparser import ConfigParser
+from tqdm.autonotebook import tqdm
 from scipy.interpolate import griddata
 from sklearn.model_selection import train_test_split
+from ray import tune
+from ray.tune import JupyterNotebookReporter
+from ray.tune.schedulers import ASHAScheduler
+from ray.tune import ExperimentAnalysis
+from ray.tune.integration.pytorch_lightning import TuneReportCallback
+from pytorch_lightning.loggers import TensorBoardLogger
+from Models import create_datasets, FaceDataset, SingleModel, EyesModel, FullModel
 
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
@@ -180,6 +189,202 @@ def get_undersampled_region(region_map, map_scale):
     min_coords = np.where(region_map == np.min(region_map))
     idx = random.randint(0, len(min_coords[0]) - 1)
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
+
+def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
+    pl.seed_everything(config["seed"])
+
+    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
+
+    model = SingleModel(config, *img_types)
+    trainer = pl.Trainer(
+        max_epochs=num_epochs,
+        gpus=num_gpus,
+        accelerator="dp",
+        progress_bar_refresh_rate=0,
+        checkpoint_callback=save_checkpoints,
+        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
+        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
+    )
+
+    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+
+
+def train_eyes(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
+    pl.seed_everything(config["seed"])
+
+    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
+
+    model = EyesModel(config)
+    trainer = pl.Trainer(
+        max_epochs=num_epochs,
+        gpus=num_gpus,
+        accelerator="dp",
+        progress_bar_refresh_rate=0,
+        checkpoint_callback=save_checkpoints,
+        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
+        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
+    )
+
+    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+
+
+def train_full(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
+    pl.seed_everything(config["seed"])
+
+    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
+
+    model = FullModel(config)
+    trainer = pl.Trainer(
+        max_epochs=num_epochs,
+        gpus=num_gpus,
+        accelerator="dp",
+        progress_bar_refresh_rate=0,
+        checkpoint_callback=save_checkpoints,
+        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
+        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
+    )
+
+    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+
+
+def dir_name_string(trial):
+    # Create a short hash from the trial parameters
+    config_str = str(trial.config)
+    import hashlib
+    short_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+    
+    # Just use the hash and trial number for naming
+    name = f"trial_{trial.trial_id}_{short_hash}"
+    return name
+
+
+def tune_asha( config, train_func, name, img_types, num_samples, num_epochs, data_partial=False, save_checkpoints=False, seed=1):
+    cwd = Path.cwd()
+    random.seed(seed)
+    np.random.seed(seed)
+
+    scheduler = ASHAScheduler(max_t=num_epochs, grace_period=1, reduction_factor=2)
+
+    reporter = JupyterNotebookReporter(
+        overwrite=True,
+        parameter_columns=list(config.keys()),
+        metric_columns=["loss", "training_iteration"],
+    )
+
+    analysis = tune.run(
+        tune.with_parameters(
+            train_func,
+            cwd=cwd,
+            data_partial=data_partial,
+            img_types=img_types,
+            save_checkpoints=save_checkpoints,
+            num_epochs=num_epochs,
+            num_gpus=1,
+        ),
+        resources_per_trial={"cpu": 2, "gpu": 1},
+        metric="loss",
+        mode="min",
+        config=config,
+        num_samples=num_samples,
+        max_failures=1,
+        scheduler=scheduler,
+        progress_reporter=reporter,
+        name="{}/{}".format(
+            name, datetime.datetime.now().strftime("%Y-%b-%d %H-%M-%S")
+        ),
+        trial_dirname_creator=dir_name_string,
+        storage_path=cwd / "logs",
+        raise_on_failed_trial=False,
+        verbose=3,
+    )
+
+    print("Best hyperparameters: {}".format(analysis.best_config))
+
+    return analysis
+
+
+def get_tune_results(analysis):
+    """Get results from single experiment"""
+
+    if analysis.best_checkpoint:
+        print(f"Directory: {analysis.best_checkpoint}")
+    else:
+        print(f"Directory: {analysis.best_logdir}")
+
+    print(f"Loss: {round(analysis.best_result['loss'],2)}")
+    print(f"Pixel error: {round(np.sqrt(analysis.best_result['loss']),2)}")
+    print("Hyperparameters...")
+    for hparam in analysis.best_config:
+        print(f"- {hparam}: {analysis.best_config[hparam]}")
+
+
+def get_best_results(path):
+    """Get best results in a directory"""
+    analysis = ExperimentAnalysis(path, default_metric="loss", default_mode="min")
+    df = analysis.dataframe()
+    df.sort_values("loss", inplace=True)
+    best = df.head(1)
+
+    print(f"\n--- Best of '{path}' ---\n")
+    print(f"Directory: {best['logdir'].values[0]}")
+    print(f"Loss: {round(best['loss'].values[0],2)}")
+    print(f"Pixel error: {round(np.sqrt(best['loss'].values[0]),2)}")
+
+    hyperparams = best.filter(like="config", axis=1)
+    print("Hyperparameters...")
+    for column in hyperparams:
+        name = column.split("/")[1]
+        value = hyperparams[column].values[0]
+        print(f"- {name}: {value}")
+
+    return analysis.get_best_config()
+
+
+def save_model(model, config, path_weights, path_config):
+    """Save trained torch weights with config"""
+    torch.save(model.state_dict(), path_weights)
+
+    with open(path_config, "w") as fp:
+        json.dump(config, fp, indent=4)
+
+
+def predict_screen_errors( *img_types, path_model, path_config, path_plot=None, path_errors=None, data_partial=True, steps=10):
+    """Get prediction error for each screen coordinate"""
+    with open(path_config) as json_file:
+        config = json.load(json_file)
+
+    if len(img_types) == 1:
+        model = SingleModel(config, img_types[0])
+    else:
+        model = FullModel(config)
+
+    model.load_state_dict(torch.load(path_model))
+    model.cuda()
+    model.eval()
+
+    data = FaceDataset(Path.cwd(), data_partial, *img_types)
+
+    x = []
+    y = []
+    error = []
+
+    for i, d in tqdm(enumerate(data), total=len(data)):
+        if i % steps == 0:
+            img_list = [d[img].unsqueeze(0).cuda() for img in img_types]
+
+            with torch.no_grad():
+                target = d["targets"].cuda()
+                predict = model(*img_list)[0]
+                dist = torch.sqrt(((predict - target) ** 2).sum(axis=0))
+
+                x.append(target.cpu().numpy()[0])
+                y.append(target.cpu().numpy()[1])
+                error.append(float(dist.cpu().numpy()))
+
+    print("Average error: {}px over {} predictions".format(round(np.mean(error), 2), len(error)))
+    errors = plot_screen_errors( x, y, error, path_plot=path_plot, path_errors=path_errors)
+
+    return errors
 
 
 def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
