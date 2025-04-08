@@ -12,7 +12,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
 
 
-def create_datasets(cwd, data_partial, img_types, batch_size=1, train_prop=0.8, val_prop=0.1, seed=87):
+def create_datasets(cwd, data_partial, img_types, batch_size=1, train_prop=0.8, val_prop=0.1, seed=87, num_workers=11):
     dataset = FaceDataset(cwd, data_partial, *img_types)
     n_train = int(len(dataset) * train_prop)
     n_val = int(len(dataset) * val_prop)
@@ -20,11 +20,32 @@ def create_datasets(cwd, data_partial, img_types, batch_size=1, train_prop=0.8, 
     ds_train, ds_val, ds_test = random_split(
         dataset, (n_train, n_val, n_test), generator=torch.Generator().manual_seed(seed))
 
-    train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, pin_memory=True)
+    train_loader = DataLoader(
+        ds_train, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        pin_memory=True, 
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False
+    )
 
-    val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False, pin_memory=True)
+    val_loader = DataLoader(
+        ds_val, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        pin_memory=True, 
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False
+    )
 
-    test_loader = DataLoader(ds_test, batch_size=batch_size, shuffle=False, pin_memory=True)
+    test_loader = DataLoader(
+        ds_test, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        pin_memory=True, 
+        num_workers=num_workers,
+        persistent_workers=True if num_workers > 0 else False
+    )
 
     return train_loader, val_loader, test_loader
 

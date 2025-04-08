@@ -9,7 +9,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 import mediapipe as mp
-
+from pytorch_lightning import seed_everything, Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 from pathlib import Path
 from collections import OrderedDict
 from configparser import ConfigParser
@@ -191,22 +193,42 @@ def get_undersampled_region(region_map, map_scale):
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
 
 def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    pl.seed_everything(config["seed"])
+    seed_everything(config["seed"])
 
-    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
-
-    model = SingleModel(config, *img_types)
-    trainer = pl.Trainer(
-        max_epochs=num_epochs,
-        gpus=num_gpus,
-        accelerator="dp",
-        progress_bar_refresh_rate=0,
-        checkpoint_callback=save_checkpoints,
-        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
-        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
+    d_train, d_val, d_test = create_datasets(
+        cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"]
     )
 
-    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+    model = SingleModel(config, *img_types)
+
+    callbacks = [
+        TuneReportCallback({"loss": "val_loss"}, on="validation_end")
+    ]
+
+    if save_checkpoints:
+        callbacks.append(ModelCheckpoint(
+            monitor="val_loss",
+            save_top_k=1,
+            mode="min",
+            filename="best-checkpoint-{epoch:02d}-{val_loss:.2f}"
+        ))
+
+    trainer = Trainer(
+        max_epochs=num_epochs,
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1 if torch.cuda.is_available() else None,
+        precision=16,  # Entrenamiento en precisión mixta
+        enable_progress_bar=False,
+        logger=TensorBoardLogger(
+            save_dir=tune.get_context().get_trial_dir(),
+            name="",
+            version=".",
+            log_graph=True
+        ),
+        callbacks=callbacks
+    )
+
+    trainer.fit(model, d_train, d_val)
 
 
 def train_eyes(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
@@ -217,15 +239,15 @@ def train_eyes(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, 
     model = EyesModel(config)
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        gpus=num_gpus,
-        accelerator="dp",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1 if torch.cuda.is_available() else None,
         progress_bar_refresh_rate=0,
         checkpoint_callback=save_checkpoints,
-        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
+        logger=TensorBoardLogger(save_dir=tune.get_context().get_trial_dir(), name="", version=".", log_graph=True),
         callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
     )
 
-    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+    trainer.fit(model, d_train, d_val)
 
 
 def train_full(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
@@ -236,15 +258,15 @@ def train_full(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, 
     model = FullModel(config)
     trainer = pl.Trainer(
         max_epochs=num_epochs,
-        gpus=num_gpus,
-        accelerator="dp",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1 if torch.cuda.is_available() else None,
         progress_bar_refresh_rate=0,
         checkpoint_callback=save_checkpoints,
-        logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version=".", log_graph=True),
+        logger=TensorBoardLogger(save_dir=tune.get_context().get_trial_dir(), name="", version=".", log_graph=True),
         callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
     )
 
-    trainer.fit(model, train_dataloader=d_train, val_dataloaders=d_val)
+    trainer.fit(model, d_train, d_val)
 
 
 def dir_name_string(trial):
