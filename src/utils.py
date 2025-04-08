@@ -217,7 +217,7 @@ def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1
         max_epochs=num_epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1 if torch.cuda.is_available() else None,
-        precision=16,  # Entrenamiento en precisión mixta
+        precision="16-mixed",  # Entrenamiento en precisión mixta
         enable_progress_bar=False,
         logger=TensorBoardLogger(
             save_dir=tune.get_context().get_trial_dir(),
