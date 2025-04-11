@@ -130,6 +130,10 @@ def cleanup():
     pygame.quit()
     sys.exit(0)
 
+# Load menu images
+menu_calibration = pygame.image.load("menu/calibration_mode.png").convert_alpha()
+menu_collection = pygame.image.load("menu/collection_mode.png").convert_alpha()
+menu_tracking = pygame.image.load("menu/tracking_mode.png").convert_alpha()
 
 while True:
     screen.fill(bg)
@@ -190,6 +194,11 @@ while True:
         screen.blit(num_images_text, (10, h - text_height * 3))
         screen.blit(img_dims_text, (10, h - text_height * 2))
 
+        for event in pygame.event.get():
+            if event.type == KEYDOWN and event.key == K_s:
+                selection_screen = True
+                show_stats = False
+
     if show_webcam:
         screen.blit(webcam_surface, (0, SETTINGS["target_radius"] * 2))
         pygame.surfarray.blit_array(
@@ -226,26 +235,37 @@ while True:
 
     # Selection screen
     if selection_screen:
-        text1 = font_normal.render(
-            "(1) Calibrate | (2) Collect | (3) Track", True, COLOURS["white"]
-        )
-        text2 = font_normal.render(
-            "(c) Toggle camera | (s) Show stats | (esc) Quit", True, COLOURS["white"]
-        )
-        screen.blit(text1, (10, h * 0.3))
-        screen.blit(text2, (10, h * 0.6))
+        # Get center coordinates
+        center_x = w // 2
+        top_y = h // 2 - menu_calibration.get_height() - 20
 
+        # Center and draw each image
+        for idx, img in enumerate([menu_calibration, menu_collection, menu_tracking]):
+            rect = img.get_rect(center=(center_x, top_y + idx * (img.get_height() + 20)))
+            screen.blit(img, rect)
+
+        # Bottom left menu with larger font
+        font_large = pygame.font.SysFont(None, 40)
+        cam_text = font_large.render("(C) Camara", True, COLOURS["white"])
+        stats_text = font_large.render("(S) Stats", True, COLOURS["white"])
+        exit_text = font_large.render("(ESC) Exit", True, COLOURS["white"])
+
+        padding = 10
+        screen.blit(cam_text, (padding, h - cam_text.get_height() * 3 - padding * 3))
+        screen.blit(stats_text, (padding, h - cam_text.get_height() * 2 - padding * 2))
+        screen.blit(exit_text, (padding, h - cam_text.get_height() - padding))
+
+        # Handle events
         for event in pygame.event.get():
             if event.type == pygame.VIDEORESIZE:
                 w, h = pygame.display.get_surface().get_size()
-                calibration_zones = get_calibration_zones(
-                    w, h, SETTINGS["target_radius"]
-                )
+                calibration_zones = get_calibration_zones(w, h, SETTINGS["target_radius"])
             elif event.type == KEYDOWN and event.key == K_ESCAPE:
                 cleanup()
             elif event.type == KEYDOWN and event.key == K_c:
                 show_webcam = not show_webcam
             elif event.type == KEYDOWN and event.key == K_s:
+                selection_screen = False
                 show_stats = not show_stats
             elif event.type == KEYDOWN and event.key == K_1:
                 selection_screen = False

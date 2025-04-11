@@ -11,6 +11,7 @@ import pytorch_lightning as pl
 import mediapipe as mp
 from pytorch_lightning import seed_everything, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from pathlib import Path
 from collections import OrderedDict
@@ -22,9 +23,10 @@ from ray import tune
 from ray.tune import JupyterNotebookReporter
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune import ExperimentAnalysis
-from ray.tune.integration.pytorch_lightning import TuneReportCallback
+from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
 from pytorch_lightning.loggers import TensorBoardLogger
 from Models import create_datasets, FaceDataset, SingleModel, EyesModel, FullModel
+import os
 
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
@@ -192,17 +194,31 @@ def get_undersampled_region(region_map, map_scale):
     idx = random.randint(0, len(min_coords[0]) - 1)
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
 
+
 def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
     seed_everything(config["seed"])
 
+    # Increase batch size if possible
+    effective_batch_size = config["bs"] * 2  # Adjust based on your GPU memory
+
+    # Use more workers for data loading
+    num_workers = min(8, os.cpu_count())  # Adjust based on your CPU cores
+
     d_train, d_val, d_test = create_datasets(
-        cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"]
+        cwd, data_partial, img_types, seed=config["seed"],
+        batch_size=effective_batch_size,
+        num_workers=num_workers
     )
 
     model = SingleModel(config, *img_types)
 
     callbacks = [
-        TuneReportCallback({"loss": "val_loss"}, on="validation_end")
+        TuneReportCheckpointCallback(
+            metrics={"loss": "val_loss"},
+            filename="checkpoint",
+            on="validation_end"
+        ),
+        EarlyStopping(monitor="val_loss", patience=3, mode="min")
     ]
 
     if save_checkpoints:
@@ -217,7 +233,7 @@ def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1
         max_epochs=num_epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1 if torch.cuda.is_available() else None,
-        precision="16-mixed",  # Entrenamiento en precisión mixta
+        precision="16-mixed",  # Mixed precision training
         enable_progress_bar=False,
         logger=TensorBoardLogger(
             save_dir=tune.get_context().get_trial_dir(),
@@ -225,48 +241,21 @@ def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1
             version=".",
             log_graph=True
         ),
-        callbacks=callbacks
+        callbacks=callbacks,
+        # Add these for faster training
+        deterministic=False,  # Slightly faster, if you don't need exact reproducibility
+        benchmark=True,  # Can speed up training
     )
 
     trainer.fit(model, d_train, d_val)
 
 
 def train_eyes(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    pl.seed_everything(config["seed"])
-
-    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
-
-    model = EyesModel(config)
-    trainer = pl.Trainer(
-        max_epochs=num_epochs,
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1 if torch.cuda.is_available() else None,
-        progress_bar_refresh_rate=0,
-        checkpoint_callback=save_checkpoints,
-        logger=TensorBoardLogger(save_dir=tune.get_context().get_trial_dir(), name="", version=".", log_graph=True),
-        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
-    )
-
-    trainer.fit(model, d_train, d_val)
+    pass
 
 
 def train_full(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    pl.seed_everything(config["seed"])
-
-    d_train, d_val, d_test = create_datasets(cwd, data_partial, img_types, seed=config["seed"], batch_size=config["bs"])
-
-    model = FullModel(config)
-    trainer = pl.Trainer(
-        max_epochs=num_epochs,
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1 if torch.cuda.is_available() else None,
-        progress_bar_refresh_rate=0,
-        checkpoint_callback=save_checkpoints,
-        logger=TensorBoardLogger(save_dir=tune.get_context().get_trial_dir(), name="", version=".", log_graph=True),
-        callbacks=[TuneReportCallback({"loss": "val_loss"}, on="validation_end")],
-    )
-
-    trainer.fit(model, d_train, d_val)
+    pass
 
 
 def dir_name_string(trial):
@@ -280,17 +269,36 @@ def dir_name_string(trial):
     return name
 
 
-def tune_asha( config, train_func, name, img_types, num_samples, num_epochs, data_partial=False, save_checkpoints=False, seed=1):
+def tune_asha(config, train_func, name, img_types, num_samples, num_epochs, data_partial=False, save_checkpoints=False,
+              seed=1):
     cwd = Path.cwd()
     random.seed(seed)
     np.random.seed(seed)
 
-    scheduler = ASHAScheduler(max_t=num_epochs, grace_period=1, reduction_factor=2)
+    # Determine available resources
+    num_cpus = max(4, os.cpu_count() - 1)  # Use most available CPUs but leave one free
+    num_gpus = torch.cuda.device_count()  # Detect available GPUs
+
+    scheduler = ASHAScheduler(
+        max_t=num_epochs,
+        grace_period=1,
+        reduction_factor=4,  # More aggressive pruning
+        brackets=1  # Fewer brackets for faster convergence
+    )
 
     reporter = JupyterNotebookReporter(
         overwrite=True,
         parameter_columns=list(config.keys()),
         metric_columns=["loss", "training_iteration"],
+    )
+
+    # Set up parallel trials based on available resources
+    cpus_per_trial = 2  # Adjust based on your workload
+    gpus_per_trial = 1 if num_gpus > 0 else 0
+    max_concurrent_trials = min(
+        num_samples,  # Don't exceed number of samples
+        max(1, num_cpus // cpus_per_trial),  # CPU-limited concurrency
+        max(1, num_gpus // gpus_per_trial) if num_gpus > 0 else float('inf')  # GPU-limited concurrency
     )
 
     analysis = tune.run(
@@ -301,9 +309,9 @@ def tune_asha( config, train_func, name, img_types, num_samples, num_epochs, dat
             img_types=img_types,
             save_checkpoints=save_checkpoints,
             num_epochs=num_epochs,
-            num_gpus=1,
+            num_gpus=gpus_per_trial,
         ),
-        resources_per_trial={"cpu": 2, "gpu": 1},
+        resources_per_trial={"cpu": cpus_per_trial, "gpu": gpus_per_trial},
         metric="loss",
         mode="min",
         config=config,
@@ -317,13 +325,13 @@ def tune_asha( config, train_func, name, img_types, num_samples, num_epochs, dat
         trial_dirname_creator=dir_name_string,
         storage_path=cwd / "logs",
         raise_on_failed_trial=False,
-        verbose=3,
+        verbose=1,
+        reuse_actors=True,
     )
 
     print("Best hyperparameters: {}".format(analysis.best_config))
 
     return analysis
-
 
 def get_tune_results(analysis):
     """Get results from single experiment"""
@@ -412,8 +420,8 @@ def predict_screen_errors( *img_types, path_model, path_config, path_plot=None, 
 def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
     """Plot prediction errors over screen space"""
     # create grid
-    xi = np.arange(0, 2560, 1)
-    yi = np.arange(0, 1440, 1)
+    xi = np.arange(0, 1920, 1)
+    yi = np.arange(0, 1080, 1)
     xi, yi = np.meshgrid(xi, yi)
 
     # interpolate
