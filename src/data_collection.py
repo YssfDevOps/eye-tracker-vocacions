@@ -386,5 +386,8 @@ while True:
             selection_screen = True
             collect_screen = False
 
+    if track_screen:
+        pass
+
     ticks = clock.tick(SETTINGS["record_frame_rate"])
     pygame.display.update()
