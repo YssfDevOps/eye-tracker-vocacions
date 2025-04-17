@@ -271,7 +271,7 @@ while True:
                 selection_screen = False
                 calibrate_screen = True
                 target.moving = False
-                target.color = COLOURS["blue"]
+                target.color = COLOURS["yellow"]
             elif event.type == KEYDOWN and event.key == K_2:
                 selection_screen = False
                 collect_screen = True
