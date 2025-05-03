@@ -10,6 +10,8 @@ import mediapipe as mp
 
 from collections import OrderedDict
 from torchvision import transforms
+from torchvision.ops.misc import interpolate
+
 from utils import get_config, shape_to_np, drawFaceMesh, getLeftEye, getRightEye
 
 # Read config.ini file
@@ -54,8 +56,8 @@ class Detector:
 
         # Threaded webcam capture
         self.capture = cv2.VideoCapture(1, cv2.CAP_DSHOW)
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
         self.capture.set(cv2.CAP_PROP_FPS, 30)
         self.q = queue.Queue()
         t = threading.Thread(target=self._reader)
@@ -141,7 +143,7 @@ class Detector:
                     frame,
                     M,
                     (self.output_size, self.output_size),
-                    flags=cv2.INTER_CUBIC,
+                    flags=cv2.INTER_LINEAR,
                 )
 
                 if angle == 0:
@@ -152,11 +154,13 @@ class Detector:
             try:
                 self.l_eye_img = getLeftEye(frame, landmarks, l_eye_center)
                 self.l_eye_img = cv2.resize(
-                    self.l_eye_img, (self.output_size, self.output_size)
+                    self.l_eye_img, (self.output_size, self.output_size),
+                    interpolation=cv2.INTER_LINEAR,
                 )
                 self.r_eye_img = getRightEye(frame, landmarks, r_eye_center)
                 self.r_eye_img = cv2.resize(
-                    self.r_eye_img, (self.output_size, self.output_size)
+                    self.r_eye_img, (self.output_size, self.output_size),
+                    interpolation=cv2.INTER_LINEAR,
                 )
             except:
                 pass
@@ -183,7 +187,8 @@ class Detector:
                 # Draw black rect
                 cv2.rectangle(frame_bw, (cx_min, cy_min), (cx_max, cy_max), 0, -1)
 
-            self.head_pos = cv2.resize(frame_bw, (self.output_size, self.output_size))
+            self.head_pos = cv2.resize(frame_bw, (self.output_size, self.output_size),
+                                       interpolation=cv2.INTER_LINEAR)
 
             if self.show_output:
                 cv2.imshow("Head position", self.head_pos)
