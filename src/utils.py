@@ -61,7 +61,7 @@ def shape_to_np(shape, dtype="int"):
 
 # Crop the right eye region
 def getRightEye(image, landmarks, eye_center):
-    eye_top = int(landmarks[263].y * image.shape[0])
+    eye_top = int(landmarks[257].y * image.shape[0])
     eye_left = int(landmarks[362].x * image.shape[1])
     eye_bottom = int(landmarks[374].y * image.shape[0])
     eye_right = int(landmarks[263].x * image.shape[1])
@@ -75,21 +75,6 @@ def getRightEye(image, landmarks, eye_center):
               eye_left:eye_right
               ]
     return eye_img
-
-
-# Get the right eye coordinates on the actual -> to visualize the bbox
-def getRightEyeRect(image, landmarks):
-    eye_top = int(landmarks[257].y * image.shape[0])
-    eye_left = int(landmarks[362].x * image.shape[1])
-    eye_bottom = int(landmarks[374].y * image.shape[0])
-    eye_right = int(landmarks[263].x * image.shape[1])
-
-    cloned_image = image.copy()
-    cropped_right_eye = cloned_image[eye_top:eye_bottom, eye_left:eye_right]
-    h, w, _ = cropped_right_eye.shape
-    x = eye_left
-    y = eye_top
-    return x, y, w, h
 
 
 def getLeftEye(image, landmarks, eye_center):
@@ -107,23 +92,6 @@ def getLeftEye(image, landmarks, eye_center):
               eye_left:eye_right
               ]
     return eye_img
-
-
-def getLeftEyeRect(image, landmarks):
-    # eye_left landmarks (27, 23, 130, 133) ->? how to utilize z info
-    eye_top = int(landmarks[159].y * image.shape[0])
-    eye_left = int(landmarks[33].x * image.shape[1])
-    eye_bottom = int(landmarks[145].y * image.shape[0])
-    eye_right = int(landmarks[133].x * image.shape[1])
-
-    cloned_image = image.copy()
-    cropped_left_eye = cloned_image[eye_top:eye_bottom, eye_left:eye_right]
-    h, w, _ = cropped_left_eye.shape
-
-    x = eye_left
-    y = eye_top
-    return x, y, w, h
-
 
 # Draw the face mesh annotations on the image.
 def drawFaceMesh(image, results):

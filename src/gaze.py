@@ -1,18 +1,11 @@
-import os
 import cv2
-import dlib
 import json
 import queue
 import threading
-import torch
 import numpy as np
 import mediapipe as mp
 
-from collections import OrderedDict
-from torchvision import transforms
-from torchvision.ops.misc import interpolate
-
-from utils import get_config, shape_to_np, drawFaceMesh, getLeftEye, getRightEye
+from utils import get_config, getLeftEye, getRightEye
 
 # Read config.ini file
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
