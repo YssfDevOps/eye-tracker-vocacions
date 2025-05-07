@@ -1,43 +1,27 @@
 import ast
 import datetime
+import inspect
 import itertools
 import json
 import random
 from configparser import ConfigParser
 from pathlib import Path
+from typing import List
+from typing import Sequence, Dict, Any
+
 import cv2
 import matplotlib.pyplot as plt
 import mediapipe as mp
-from typing import List
-import numpy as np
-import pytorch_lightning as pl
-import torch
-from models import (
-    SingleModel,
-    EyesModel,
-    FullModel,
-)
-from pytorch_lightning.loggers import TensorBoardLogger
-from ray import tune
-from ray.tune import JupyterNotebookReporter
-from ray.tune.schedulers import ASHAScheduler
-from scipy.interpolate import griddata
-from tqdm.autonotebook import tqdm
-import datetime
-import json
-import random
-from pathlib import Path
-from typing import Sequence, Dict, Any
-
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
 from ray import tune
-from ray.tune.schedulers import ASHAScheduler
 from ray.tune.integration.pytorch_lightning import (
     TuneReportCheckpointCallback,
 )
+from ray.tune.schedulers import ASHAScheduler
+from scipy.interpolate import griddata
 
 from models import (
     GazeDataModule,
@@ -45,7 +29,6 @@ from models import (
     EyesModel,
     FullModel,
 )
-
 
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
@@ -185,10 +168,18 @@ def get_undersampled_region(region_map, map_scale):
 # 1  Utility builders
 # -----------------------------------------------------------------------------
 
-def _build_datamodule(data_dir: Path | str, img_types: Sequence[str], cfg: Dict[str, Any]):
-    """Return a *GazeDataModule* given CLI/Ray‑Tune `cfg`."""
+def _build_datamodule(
+    data_dir: str | Path,
+    img_types: Sequence[str],
+    cfg: Dict[str, Any],
+) -> GazeDataModule:
+    """Return an initialised **GazeDataModule** using an absolute path."""
+    data_dir = Path(data_dir).expanduser().resolve()
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Dataset folder not found: {data_dir}")
+
     return GazeDataModule(
-        data_dir=Path(data_dir),
+        data_dir=data_dir,
         batch_size=int(cfg.get("bs", 128)),
         img_types=img_types,
         seed=int(cfg.get("seed", 87)),
@@ -196,10 +187,7 @@ def _build_datamodule(data_dir: Path | str, img_types: Sequence[str], cfg: Dict[
 
 
 def _build_model(cfg: Dict[str, Any], img_types: Sequence[str]):
-    """Instantiate the proper model, automatically stripping unknown kwargs."""
-    import inspect
-
-    # Decide which class to use
+    """Instantiate the correct model and drop unknown kwargs automatically."""
     if len(img_types) == 1:
         cls = SingleModel
     elif set(img_types) == {"l_eye", "r_eye"}:
@@ -207,16 +195,12 @@ def _build_model(cfg: Dict[str, Any], img_types: Sequence[str]):
     else:
         cls = FullModel
 
-    # Keep only kwargs that the target class accepts
     sig = inspect.signature(cls.__init__)
-    valid_keys = set(sig.parameters) - {"self", "args", "kwargs"}
-
-    kwargs = {k: v for k, v in cfg.items() if k in valid_keys}
+    valid = {k: v for k, v in cfg.items() if k in sig.parameters}
 
     if len(img_types) == 1:
-        return cls(img_type=img_types[0], **kwargs)
-    else:
-        return cls(**kwargs)
+        return cls(img_type=img_types[0], **valid)
+    return cls(**valid)
 # -----------------------------------------------------------------------------
 # 2. Core Lightning training routine (shared by standalone + Ray‑Tune)
 # -----------------------------------------------------------------------------
@@ -228,7 +212,7 @@ def _train_model(
     num_epochs: int = 20,
     tune_report: bool = False,
 ):
-    """Single‑GPU/CPU train; reports metrics to Ray‑Tune when *tune_report* is True."""
+    """Single GPU/CPU train; reports metrics to RayTune when *tune_report* is True."""
 
     pl.seed_everything(int(cfg.get("seed", 87)), workers=True)
     data_dir = Path(data_dir or "data")
@@ -258,6 +242,7 @@ def _train_model(
         precision="bf16-mixed" if torch.cuda.is_available() else 32,
         logger=tb_logger,
         callbacks=callbacks,
+        log_every_n_steps = 10,
     )
 
     trainer.fit(model, dm)
@@ -335,7 +320,7 @@ def tune_asha(
         raise_on_failed_trial=False,
     )
 
-    print("Best hyperparameters →", analysis.best_config)
+    print("Best hyperparameters: ", analysis.best_config)
     return analysis
 
 # -----------------------------------------------------------------------------
@@ -349,7 +334,7 @@ def _ensure_fig_dir() -> Path:
 
 
 def plot_asha_scatter(analysis, param: str, save_path: str | Path | None = None):
-    """Scatter plot of a single hyper‑parameter value vs. final validation loss."""
+    """Scatter plot of a single hyperparameter value vs. final validation loss."""
     df = analysis.dataframe()
     if f"config/{param}" not in df.columns:
         raise KeyError(f"Parameter '{param}' not found in analysis dataframe.")
@@ -369,7 +354,7 @@ def plot_asha_scatter(analysis, param: str, save_path: str | Path | None = None)
 
 
 def plot_topk_learning_curves(analysis, k: int = 5, save_path: str | Path | None = None):
-    """Overlay val_loss curves of the top‑k trials sorted by final loss."""
+    """Overlay val_loss curves of the top-k trials sorted by final loss."""
     df = analysis.dataframe()
     top_trials = df.nsmallest(k, "loss")["trial_id"]
 
@@ -380,7 +365,7 @@ def plot_topk_learning_curves(analysis, k: int = 5, save_path: str | Path | None
             plt.plot(tdf["training_iteration"], tdf["val_loss"], label=f"trial {tid}")
     plt.xlabel("Epoch")
     plt.ylabel("val_loss")
-    plt.title(f"Top‑{k} learning curves (ASHA)")
+    plt.title(f"Top-{k} learning curves (ASHA)")
     plt.legend(fontsize="small")
 
     save_path = save_path or _ensure_fig_dir() / f"asha_top{k}_curves.png"
@@ -392,24 +377,17 @@ def plot_topk_learning_curves(analysis, k: int = 5, save_path: str | Path | None
 
 
 def plot_asha_overview(analysis, params: List[str], top_k: int = 8):
-    """Convenience one‑liner: scatter for *each* param + learning curves."""
+    """Convenience one-liner: scatter for *each* param + learning curves."""
     for p in params:
         plot_asha_scatter(analysis, p)
     plot_topk_learning_curves(analysis, k=top_k)
 
 def get_tune_results(analysis):
-    """Get results from single experiment"""
-
     if analysis.best_checkpoint:
-        print(f"Directory: {analysis.best_checkpoint}")
-    else:
-        print(f"Directory: {analysis.best_logdir}")
-
-    print(f"Loss: {round(analysis.best_result['loss'],2)}")
-    print(f"Pixel error: {round(np.sqrt(analysis.best_result['loss']),2)}")
-    print("Hyperparameters...")
-    for hparam in analysis.best_config:
-        print(f"- {hparam}: {analysis.best_config[hparam]}")
+        print("Directory:", analysis.best_checkpoint)
+    print("Loss:", round(analysis.best_result["loss"], 3))
+    print("Pixel error:", round(np.sqrt(analysis.best_result["loss"]), 3))
+    print("Hyper-params: ", json.dumps(analysis.best_config, indent=2))
 
 
 def get_best_results(path):

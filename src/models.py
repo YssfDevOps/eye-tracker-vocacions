@@ -19,11 +19,10 @@ __all__ = [
     "SingleModel",
     "EyesModel",
     "FullModel",
-    "create_datasets",  # legacy helper
 ]
 
 # -----------------------------------------------------------------------------
-# 1  Dataset & DataModule
+# 1. Dataset & DataModule
 # -----------------------------------------------------------------------------
 
 class GazeDataset(Dataset):
@@ -121,6 +120,7 @@ class GazeDataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.hparams.num_workers,
             pin_memory=True,
+            persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -130,6 +130,7 @@ class GazeDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.hparams.num_workers,
             pin_memory=True,
+            persistent_workers=True,
         )
 
     def test_dataloader(self):
@@ -143,7 +144,7 @@ class GazeDataModule(pl.LightningDataModule):
 
 
 # -----------------------------------------------------------------------------
-# 2  Building blocks
+# 2. Building blocks
 # -----------------------------------------------------------------------------
 
 def _conv_block(in_ch: int, out_ch: int, ks: int = 3) -> nn.Sequential:
@@ -157,8 +158,6 @@ def _conv_block(in_ch: int, out_ch: int, ks: int = 3) -> nn.Sequential:
 
 
 class ConvStack(nn.Sequential):
-    """A small configurable CNN finished by global pooling (→ 1×1)."""
-
     def __init__(self, in_ch: int, channels: Sequence[int] = (32, 64, 128), ks: int = 3):
         layers = []
         c_curr = in_ch
@@ -171,7 +170,7 @@ class ConvStack(nn.Sequential):
 
 
 # -----------------------------------------------------------------------------
-# 3  Lightning base class with common training logic
+# 3. Lightning base class with common training logic
 # -----------------------------------------------------------------------------
 
 class _Base(pl.LightningModule):
@@ -200,7 +199,7 @@ class _Base(pl.LightningModule):
 
 
 # -----------------------------------------------------------------------------
-# 4  Model variants
+# 4. Model variants
 # -----------------------------------------------------------------------------
 
 class SingleModel(_Base):
@@ -284,8 +283,6 @@ class EyesModel(_Base):
 
 
 class FullModel(_Base):
-    """Full late‑fusion model: face + both eyes + head‑pos mask + head angle."""
-
     def __init__(
         self,
         lr: float = 3e-4,
@@ -355,31 +352,3 @@ class FullModel(_Base):
             batch["head_angle"],
         )
         self._shared_step(preds, batch["targets"], "test")
-
-
-# -----------------------------------------------------------------------------
-# 5  Legacy helper – drop‑in replacement for your old create_datasets()
-# -----------------------------------------------------------------------------
-
-def create_datasets(
-    data_dir: Union[str, Path] = "data",
-    img_types: Sequence[str] = ("l_eye", "r_eye"),
-    batch_size: int = 128,
-    train_prop: float = 0.8,
-    val_prop: float = 0.1,
-    seed: int = 87,
-):
-    """Returns **train/val/test DataLoaders** (keep your old scripts running).
-
-    >>> train_loader, val_loader, test_loader = create_datasets()
-    """
-    dm = GazeDataModule(
-        data_dir=data_dir,
-        batch_size=batch_size,
-        train_prop=train_prop,
-        val_prop=val_prop,
-        img_types=img_types,
-        seed=seed,
-    )
-    dm.setup(None)
-    return dm.train_dataloader(), dm.val_dataloader(), dm.test_dataloader()
