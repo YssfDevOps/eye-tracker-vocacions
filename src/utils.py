@@ -1,32 +1,51 @@
 import ast
-import random
-import json
 import datetime
 import itertools
-import cv2
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import pytorch_lightning as pl
-import mediapipe as mp
-from pytorch_lightning import seed_everything, Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
-from pathlib import Path
-from collections import OrderedDict
+import json
+import random
 from configparser import ConfigParser
-from tqdm.autonotebook import tqdm
-from scipy.interpolate import griddata
-from sklearn.model_selection import train_test_split
+from pathlib import Path
+import cv2
+import matplotlib.pyplot as plt
+import mediapipe as mp
+from typing import List
+import numpy as np
+import pytorch_lightning as pl
+import torch
+from models import (
+    SingleModel,
+    EyesModel,
+    FullModel,
+)
+from pytorch_lightning.loggers import TensorBoardLogger
 from ray import tune
 from ray.tune import JupyterNotebookReporter
 from ray.tune.schedulers import ASHAScheduler
-from ray.tune import ExperimentAnalysis
-from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
+from scipy.interpolate import griddata
+from tqdm.autonotebook import tqdm
+import datetime
+import json
+import random
+from pathlib import Path
+from typing import Sequence, Dict, Any
+
+import numpy as np
+import pytorch_lightning as pl
+import torch
 from pytorch_lightning.loggers import TensorBoardLogger
-from Models import create_datasets, FaceDataset, SingleModel, EyesModel, FullModel
-import os
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
+from ray.tune.integration.pytorch_lightning import (
+    TuneReportCheckpointCallback,
+)
+
+from models import (
+    GazeDataModule,
+    SingleModel,
+    EyesModel,
+    FullModel,
+)
+
 
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
@@ -162,144 +181,221 @@ def get_undersampled_region(region_map, map_scale):
     idx = random.randint(0, len(min_coords[0]) - 1)
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
 
+# -----------------------------------------------------------------------------
+# 1  Utility builders
+# -----------------------------------------------------------------------------
 
-def train_single(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    seed_everything(config["seed"])
-
-    # Increase batch size if possible
-    effective_batch_size = config["bs"] * 2  # Adjust based on your GPU memory
-
-    # Use more workers for data loading
-    num_workers = min(8, os.cpu_count())  # Adjust based on your CPU cores
-
-    d_train, d_val, d_test = create_datasets(
-        cwd, data_partial, img_types, seed=config["seed"],
-        batch_size=effective_batch_size,
-        num_workers=num_workers
+def _build_datamodule(data_dir: Path | str, img_types: Sequence[str], cfg: Dict[str, Any]):
+    """Return a *GazeDataModule* given CLI/Ray‑Tune `cfg`."""
+    return GazeDataModule(
+        data_dir=Path(data_dir),
+        batch_size=int(cfg.get("bs", 128)),
+        img_types=img_types,
+        seed=int(cfg.get("seed", 87)),
     )
 
-    model = SingleModel(config, *img_types)
 
-    callbacks = [
-        TuneReportCheckpointCallback(
-            metrics={"loss": "val_loss"},
-            filename="checkpoint",
-            on="validation_end"
-        ),
-        EarlyStopping(monitor="val_loss", patience=3, mode="min")
-    ]
+def _build_model(cfg: Dict[str, Any], img_types: Sequence[str]):
+    """Instantiate the proper model, automatically stripping unknown kwargs."""
+    import inspect
 
-    if save_checkpoints:
-        callbacks.append(ModelCheckpoint(
-            monitor="val_loss",
-            save_top_k=1,
-            mode="min",
-            filename="best-checkpoint-{epoch:02d}-{val_loss:.2f}"
-        ))
+    # Decide which class to use
+    if len(img_types) == 1:
+        cls = SingleModel
+    elif set(img_types) == {"l_eye", "r_eye"}:
+        cls = EyesModel
+    else:
+        cls = FullModel
 
-    trainer = Trainer(
+    # Keep only kwargs that the target class accepts
+    sig = inspect.signature(cls.__init__)
+    valid_keys = set(sig.parameters) - {"self", "args", "kwargs"}
+
+    kwargs = {k: v for k, v in cfg.items() if k in valid_keys}
+
+    if len(img_types) == 1:
+        return cls(img_type=img_types[0], **kwargs)
+    else:
+        return cls(**kwargs)
+# -----------------------------------------------------------------------------
+# 2. Core Lightning training routine (shared by standalone + Ray‑Tune)
+# -----------------------------------------------------------------------------
+
+def _train_model(
+    cfg: Dict[str, Any],
+    img_types: Sequence[str],
+    data_dir: Path | str | None = None,
+    num_epochs: int = 20,
+    tune_report: bool = False,
+):
+    """Single‑GPU/CPU train; reports metrics to Ray‑Tune when *tune_report* is True."""
+
+    pl.seed_everything(int(cfg.get("seed", 87)), workers=True)
+    data_dir = Path(data_dir or "data")
+
+    dm = _build_datamodule(data_dir, img_types, cfg)
+    model = _build_model(cfg, img_types)
+
+    callbacks: List[Any] = []
+    if tune_report:
+        callbacks.append(
+            TuneReportCheckpointCallback(
+                metrics={"loss": "val_loss", "mae": "val_mae"}, on="validation_end"
+            )
+        )
+
+    tb_logger = TensorBoardLogger(
+        save_dir="tb_logs",
+        name="gaze",
+        version=datetime.datetime.now().strftime("%Y%m%d-%H%M%S"),
+    )
+
+    trainer = pl.Trainer(
         max_epochs=num_epochs,
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1 if torch.cuda.is_available() else None,
-        precision="16-mixed",  # Mixed precision training
+        accelerator="auto",
+        devices="auto",
         enable_progress_bar=False,
-        logger=TensorBoardLogger(
-            save_dir=tune.get_context().get_trial_dir(),
-            name="",
-            version=".",
-            log_graph=True
-        ),
+        precision="bf16-mixed" if torch.cuda.is_available() else 32,
+        logger=tb_logger,
         callbacks=callbacks,
-        # Add these for faster training
-        deterministic=False,  # Slightly faster, if you don't need exact reproducibility
-        benchmark=True,  # Can speed up training
     )
 
-    trainer.fit(model, d_train, d_val)
+    trainer.fit(model, dm)
+
+    if not tune_report:
+        metrics = trainer.callback_metrics
+        print(
+            f"\nFinished – val_loss: {metrics['val_loss']:.3f}, val_mae: {metrics['val_mae']:.3f}"
+        )
+        return metrics
+
+# -----------------------------------------------------------------------------
+# 3. Thin wrappers – keep public API stable
+# -----------------------------------------------------------------------------
+
+def train_single(cfg: Dict[str, Any], img_types: Sequence[str], num_epochs: int = 15, data_dir: Path | str = "data"):
+    assert len(img_types) == 1, "SingleModel expects exactly one img_type"
+    _train_model(cfg, img_types, data_dir, num_epochs, tune_report=False)
 
 
-def train_eyes(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    pass
+def train_eyes(cfg: Dict[str, Any], img_types: Sequence[str] = ("l_eye", "r_eye"), num_epochs: int = 15, data_dir: Path | str = "data"):
+    assert set(img_types) == {"l_eye", "r_eye"}, "EyesModel needs both eyes"
+    _train_model(cfg, img_types, data_dir, num_epochs, tune_report=False)
 
 
-def train_full(config, cwd, data_partial, img_types, num_epochs=1, num_gpus=-1, save_checkpoints=False):
-    pass
+def train_full(cfg: Dict[str, Any], img_types: Sequence[str] = ("face_aligned", "l_eye", "r_eye", "head_pos", "head_angle"), num_epochs: int = 20, data_dir: Path | str = "data"):
+    _train_model(cfg, img_types, data_dir, num_epochs, tune_report=False)
 
+# -----------------------------------------------------------------------------
+# 4. Ray‑Tune – ASHA search
+# -----------------------------------------------------------------------------
 
-def dir_name_string(trial):
-    # Create a short hash from the trial parameters
-    config_str = str(trial.config)
-    import hashlib
-    short_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
-    
-    # Just use the hash and trial number for naming
-    name = f"trial_{trial.trial_id}_{short_hash}"
-    return name
+def tune_asha(
+    config: Dict[str, Any],
+    train_func: str,  # "single", "eyes", or "full"
+    name: str,
+    img_types: Sequence[str],
+    num_samples: int = 10,
+    num_epochs: int = 20,
+    data_dir: Path | str = "data",
+    seed: int = 1,
+):
+    """Run hyperparameter optimisation with ASHA and return ExperimentAnalysis."""
 
+    train_map = {
+        "single": train_single,
+        "eyes": train_eyes,
+        "full": train_full,
+    }
+    assert train_func in train_map, "train_func must be 'single', 'eyes', or 'full'"
 
-def tune_asha(config, train_func, name, img_types, num_samples, num_epochs, data_partial=False, save_checkpoints=False,
-              seed=1):
-    cwd = Path.cwd()
-    random.seed(seed)
-    np.random.seed(seed)
+    def _tune_wrapper(cfg):
+        _train_model(cfg, img_types, data_dir, num_epochs, tune_report=True)
 
-    # Determine available resources
-    num_cpus = max(4, os.cpu_count() - 1)  # Use most available CPUs but leave one free
-    num_gpus = torch.cuda.device_count()  # Detect available GPUs
+    scheduler = ASHAScheduler(max_t=num_epochs, grace_period=1, reduction_factor=2)
 
-    scheduler = ASHAScheduler(
-        max_t=num_epochs,
-        grace_period=1,
-        reduction_factor=4,  # More aggressive pruning
-        brackets=1  # Fewer brackets for faster convergence
-    )
-
-    reporter = JupyterNotebookReporter(
-        overwrite=True,
-        parameter_columns=list(config.keys()),
-        metric_columns=["loss", "training_iteration"],
-    )
-
-    # Set up parallel trials based on available resources
-    cpus_per_trial = 2  # Adjust based on your workload
-    gpus_per_trial = 1 if num_gpus > 0 else 0
-    max_concurrent_trials = min(
-        num_samples,  # Don't exceed number of samples
-        max(1, num_cpus // cpus_per_trial),  # CPU-limited concurrency
-        max(1, num_gpus // gpus_per_trial) if num_gpus > 0 else float('inf')  # GPU-limited concurrency
-    )
+    def _short_name(trial):
+        # just use the numeric trial_id to avoid 260‑char shell‑shock
+        return str(trial.trial_id)
 
     analysis = tune.run(
-        tune.with_parameters(
-            train_func,
-            cwd=cwd,
-            data_partial=data_partial,
-            img_types=img_types,
-            save_checkpoints=save_checkpoints,
-            num_epochs=num_epochs,
-            num_gpus=gpus_per_trial,
-        ),
-        resources_per_trial={"cpu": cpus_per_trial, "gpu": gpus_per_trial},
+        _tune_wrapper,
+        resources_per_trial={"cpu": 4, "gpu": 1 if torch.cuda.is_available() else 0},
         metric="loss",
         mode="min",
-        config=config,
         num_samples=num_samples,
-        max_failures=1,
+        config=config,
         scheduler=scheduler,
-        progress_reporter=reporter,
-        name="{}/{}".format(
-            name, datetime.datetime.now().strftime("%Y-%b-%d %H-%M-%S")
-        ),
-        trial_dirname_creator=dir_name_string,
-        storage_path=cwd / "logs",
+        name=f"{name}_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        storage_path=Path.cwd() / "logs",
+        log_to_file=True,
+        fail_fast=True,
+        trial_dirname_creator=_short_name,
+        verbose=3,
         raise_on_failed_trial=False,
-        verbose=1,
-        reuse_actors=True,
     )
 
-    print("Best hyperparameters: {}".format(analysis.best_config))
-
+    print("Best hyperparameters →", analysis.best_config)
     return analysis
+
+# -----------------------------------------------------------------------------
+# 5. Visualisation helpers – *the* plotters referenced in the notebook
+# -----------------------------------------------------------------------------
+
+def _ensure_fig_dir() -> Path:
+    fig_dir = Path.cwd() / "figs"
+    fig_dir.mkdir(exist_ok=True)
+    return fig_dir
+
+
+def plot_asha_scatter(analysis, param: str, save_path: str | Path | None = None):
+    """Scatter plot of a single hyper‑parameter value vs. final validation loss."""
+    df = analysis.dataframe()
+    if f"config/{param}" not in df.columns:
+        raise KeyError(f"Parameter '{param}' not found in analysis dataframe.")
+
+    plt.figure(figsize=(6, 4))
+    plt.scatter(df[f"config/{param}"], df["loss"], alpha=0.6, edgecolor="k")
+    plt.xlabel(param)
+    plt.ylabel("val_loss")
+    plt.title(f"ASHA search – {param} vs. val_loss")
+
+    save_path = save_path or _ensure_fig_dir() / f"asha_scatter_{param}.png"
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120)
+    plt.show()
+
+    return Path(save_path)
+
+
+def plot_topk_learning_curves(analysis, k: int = 5, save_path: str | Path | None = None):
+    """Overlay val_loss curves of the top‑k trials sorted by final loss."""
+    df = analysis.dataframe()
+    top_trials = df.nsmallest(k, "loss")["trial_id"]
+
+    plt.figure(figsize=(7, 4))
+    for tid in top_trials:
+        tdf = analysis.trial_dataframes[tid]
+        if "val_loss" in tdf.columns:
+            plt.plot(tdf["training_iteration"], tdf["val_loss"], label=f"trial {tid}")
+    plt.xlabel("Epoch")
+    plt.ylabel("val_loss")
+    plt.title(f"Top‑{k} learning curves (ASHA)")
+    plt.legend(fontsize="small")
+
+    save_path = save_path or _ensure_fig_dir() / f"asha_top{k}_curves.png"
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120)
+    plt.show()
+
+    return Path(save_path)
+
+
+def plot_asha_overview(analysis, params: List[str], top_k: int = 8):
+    """Convenience one‑liner: scatter for *each* param + learning curves."""
+    for p in params:
+        plot_asha_scatter(analysis, p)
+    plot_topk_learning_curves(analysis, k=top_k)
 
 def get_tune_results(analysis):
     """Get results from single experiment"""
@@ -317,8 +413,8 @@ def get_tune_results(analysis):
 
 
 def get_best_results(path):
-    """Get best results in a directory"""
-    analysis = ExperimentAnalysis(path, default_metric="loss", default_mode="min")
+    """Get best results in a directory
+    analysis = Analysis(path, default_metric="loss", default_mode="min")
     df = analysis.dataframe()
     df.sort_values("loss", inplace=True)
     best = df.head(1)
@@ -335,7 +431,7 @@ def get_best_results(path):
         value = hyperparams[column].values[0]
         print(f"- {name}: {value}")
 
-    return analysis.get_best_config()
+    return analysis.get_best_config()"""
 
 
 def save_model(model, config, path_weights, path_config):
@@ -346,8 +442,9 @@ def save_model(model, config, path_weights, path_config):
         json.dump(config, fp, indent=4)
 
 
+
 def predict_screen_errors( *img_types, path_model, path_config, path_plot=None, path_errors=None, data_partial=True, steps=10):
-    """Get prediction error for each screen coordinate"""
+    """Get prediction error for each screen coordinate
     with open(path_config) as json_file:
         config = json.load(json_file)
 
@@ -382,7 +479,7 @@ def predict_screen_errors( *img_types, path_model, path_config, path_plot=None, 
     print("Average error: {}px over {} predictions".format(round(np.mean(error), 2), len(error)))
     errors = plot_screen_errors( x, y, error, path_plot=path_plot, path_errors=path_errors)
 
-    return errors
+    return errors"""
 
 
 def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
