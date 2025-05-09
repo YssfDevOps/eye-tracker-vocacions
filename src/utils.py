@@ -8,21 +8,21 @@ from configparser import ConfigParser
 from pathlib import Path
 from typing import List
 from typing import Sequence, Dict, Any
-
-import cv2
+from ray.tune import ExperimentAnalysis
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mediapipe as mp
+import pandas as pd
+from scipy.interpolate import griddata
+from pandas.plotting import parallel_coordinates
+from tqdm.auto import tqdm
 import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
 from ray import tune
-from ray.tune.integration.pytorch_lightning import (
-    TuneReportCheckpointCallback,
-)
+from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
 from ray.tune.schedulers import ASHAScheduler
-from scipy.interpolate import griddata
-
 from models import (
     GazeDataModule,
     SingleModel,
@@ -52,14 +52,6 @@ def get_config(path="config.ini", comment_char=";"):
     tf = {key: ast.literal_eval(config_tf[key]) for key in config_tf}
 
     return settings, colours, eyetracker, tf
-
-
-def shape_to_np(shape, dtype="int"):
-    coords = np.zeros((5, 2), dtype=dtype)
-    for i in range(0, 5):
-        coords[i] = (shape.part(i).x, shape.part(i).y)
-    return coords
-
 
 # Crop the right eye region
 def getRightEye(image, landmarks, eye_center):
@@ -94,21 +86,6 @@ def getLeftEye(image, landmarks, eye_center):
               eye_left:eye_right
               ]
     return eye_img
-
-# Draw the face mesh annotations on the image.
-def drawFaceMesh(image, results):
-    image.flags.writeable = True
-    # image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            #         print('face landmarks', face_landmarks)
-            mp_drawing.draw_landmarks(
-                image=image,
-                landmark_list=face_landmarks,
-                connections=mp_face_mesh.FACEMESH_CONTOURS,
-                landmark_drawing_spec=drawing_spec,
-                connection_drawing_spec=drawing_spec)
-        cv2.imshow('MediaPipe FaceMesh', image)
 
 
 def bgr_to_rgb(img):
@@ -150,7 +127,6 @@ def plot_region_map(path, region_map, map_scale, cmap="inferno"):
 
 
 def get_calibration_zones(w, h, target_radius):
-    """Get coordinates for 9 point calibration"""
     xs = (0 + target_radius, w / 2, w - target_radius)
     ys = (0 + target_radius, h / 2, h - target_radius)
     zones = list(itertools.product(xs, ys))
@@ -159,21 +135,11 @@ def get_calibration_zones(w, h, target_radius):
 
 
 def get_undersampled_region(region_map, map_scale):
-    """Get screen coordinates with fewest data samples"""
     min_coords = np.where(region_map == np.min(region_map))
     idx = random.randint(0, len(min_coords[0]) - 1)
     return (min_coords[0][idx] * map_scale, min_coords[1][idx] * map_scale)
 
-# -----------------------------------------------------------------------------
-# 1  Utility builders
-# -----------------------------------------------------------------------------
-
-def _build_datamodule(
-    data_dir: str | Path,
-    img_types: Sequence[str],
-    cfg: Dict[str, Any],
-) -> GazeDataModule:
-    """Return an initialised **GazeDataModule** using an absolute path."""
+def _build_datamodule( data_dir: str | Path, img_types: Sequence[str], cfg: Dict[str, Any]) -> GazeDataModule:
     data_dir = Path(data_dir).expanduser().resolve()
     if not data_dir.exists():
         raise FileNotFoundError(f"Dataset folder not found: {data_dir}")
@@ -187,7 +153,6 @@ def _build_datamodule(
 
 
 def _build_model(cfg: Dict[str, Any], img_types: Sequence[str]):
-    """Instantiate the correct model and drop unknown kwargs automatically."""
     if len(img_types) == 1:
         cls = SingleModel
     elif set(img_types) == {"l_eye", "r_eye"}:
@@ -201,9 +166,7 @@ def _build_model(cfg: Dict[str, Any], img_types: Sequence[str]):
     if len(img_types) == 1:
         return cls(img_type=img_types[0], **valid)
     return cls(**valid)
-# -----------------------------------------------------------------------------
-# 2. Core Lightning training routine (shared by standalone + Ray‑Tune)
-# -----------------------------------------------------------------------------
+
 
 def _train_model(
     cfg: Dict[str, Any],
@@ -212,8 +175,6 @@ def _train_model(
     num_epochs: int = 20,
     tune_report: bool = False,
 ):
-    """Single GPU/CPU train; reports metrics to RayTune when *tune_report* is True."""
-
     pl.seed_everything(int(cfg.get("seed", 87)), workers=True)
     data_dir = Path(data_dir or "data")
 
@@ -249,14 +210,9 @@ def _train_model(
 
     if not tune_report:
         metrics = trainer.callback_metrics
-        print(
-            f"\nFinished – val_loss: {metrics['val_loss']:.3f}, val_mae: {metrics['val_mae']:.3f}"
-        )
+        print(f"\nFinished – val_loss: {metrics['val_loss']:.3f}, val_mae: {metrics['val_mae']:.3f}")
         return metrics
 
-# -----------------------------------------------------------------------------
-# 3. Thin wrappers – keep public API stable
-# -----------------------------------------------------------------------------
 
 def train_single(cfg: Dict[str, Any], img_types: Sequence[str], num_epochs: int = 15, data_dir: Path | str = "data"):
     assert len(img_types) == 1, "SingleModel expects exactly one img_type"
@@ -271,12 +227,9 @@ def train_eyes(cfg: Dict[str, Any], img_types: Sequence[str] = ("l_eye", "r_eye"
 def train_full(cfg: Dict[str, Any], img_types: Sequence[str] = ("face_aligned", "l_eye", "r_eye", "head_pos", "head_angle"), num_epochs: int = 20, data_dir: Path | str = "data"):
     _train_model(cfg, img_types, data_dir, num_epochs, tune_report=False)
 
-# -----------------------------------------------------------------------------
-# 4. Ray‑Tune – ASHA search
-# -----------------------------------------------------------------------------
 
 def tune_asha(
-    config: Dict[str, Any],
+    search_space: Dict[str, Any],
     train_func: str,  # "single", "eyes", or "full"
     name: str,
     img_types: Sequence[str],
@@ -285,7 +238,6 @@ def tune_asha(
     data_dir: Path | str = "data",
     seed: int = 1,
 ):
-    """Run hyperparameter optimisation with ASHA and return ExperimentAnalysis."""
 
     train_map = {
         "single": train_single,
@@ -300,16 +252,15 @@ def tune_asha(
     scheduler = ASHAScheduler(max_t=num_epochs, grace_period=1, reduction_factor=2)
 
     def _short_name(trial):
-        # just use the numeric trial_id to avoid 260‑char shell‑shock
         return str(trial.trial_id)
 
     analysis = tune.run(
         _tune_wrapper,
-        resources_per_trial={"cpu": 4, "gpu": 1 if torch.cuda.is_available() else 0},
+        resources_per_trial={"cpu": 8, "gpu": 1 if torch.cuda.is_available() else 0},
         metric="loss",
         mode="min",
         num_samples=num_samples,
-        config=config,
+        config=search_space,
         scheduler=scheduler,
         name=f"{name}_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
         storage_path=Path.cwd() / "logs",
@@ -323,64 +274,19 @@ def tune_asha(
     print("Best hyperparameters: ", analysis.best_config)
     return analysis
 
-# -----------------------------------------------------------------------------
-# 5. Visualisation helpers – *the* plotters referenced in the notebook
-# -----------------------------------------------------------------------------
+
+def latest_tune_dir(parent: Path) -> Path:
+    subdirs = [p for p in parent.iterdir() if p.is_dir() and p.name.startswith("tune_")]
+    if not subdirs:
+        raise FileNotFoundError(f"No tune_* folder in {parent}")
+    return max(subdirs, key=lambda p: p.stat().st_mtime)
+
 
 def _ensure_fig_dir() -> Path:
     fig_dir = Path.cwd() / "figs"
     fig_dir.mkdir(exist_ok=True)
     return fig_dir
 
-
-def plot_asha_scatter(analysis, param: str, save_path: str | Path | None = None):
-    """Scatter plot of a single hyperparameter value vs. final validation loss."""
-    df = analysis.dataframe()
-    if f"config/{param}" not in df.columns:
-        raise KeyError(f"Parameter '{param}' not found in analysis dataframe.")
-
-    plt.figure(figsize=(6, 4))
-    plt.scatter(df[f"config/{param}"], df["loss"], alpha=0.6, edgecolor="k")
-    plt.xlabel(param)
-    plt.ylabel("val_loss")
-    plt.title(f"ASHA search – {param} vs. val_loss")
-
-    save_path = save_path or _ensure_fig_dir() / f"asha_scatter_{param}.png"
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=120)
-    plt.show()
-
-    return Path(save_path)
-
-
-def plot_topk_learning_curves(analysis, k: int = 5, save_path: str | Path | None = None):
-    """Overlay val_loss curves of the top-k trials sorted by final loss."""
-    df = analysis.dataframe()
-    top_trials = df.nsmallest(k, "loss")["trial_id"]
-
-    plt.figure(figsize=(7, 4))
-    for tid in top_trials:
-        tdf = analysis.trial_dataframes[tid]
-        if "val_loss" in tdf.columns:
-            plt.plot(tdf["training_iteration"], tdf["val_loss"], label=f"trial {tid}")
-    plt.xlabel("Epoch")
-    plt.ylabel("val_loss")
-    plt.title(f"Top-{k} learning curves (ASHA)")
-    plt.legend(fontsize="small")
-
-    save_path = save_path or _ensure_fig_dir() / f"asha_top{k}_curves.png"
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=120)
-    plt.show()
-
-    return Path(save_path)
-
-
-def plot_asha_overview(analysis, params: List[str], top_k: int = 8):
-    """Convenience one-liner: scatter for *each* param + learning curves."""
-    for p in params:
-        plot_asha_scatter(analysis, p)
-    plot_topk_learning_curves(analysis, k=top_k)
 
 def get_tune_results(analysis):
     if analysis.best_checkpoint:
@@ -391,8 +297,7 @@ def get_tune_results(analysis):
 
 
 def get_best_results(path):
-    """Get best results in a directory
-    analysis = Analysis(path, default_metric="loss", default_mode="min")
+    analysis = ExperimentAnalysis(path, default_metric="loss", default_mode="min")
     df = analysis.dataframe()
     df.sort_values("loss", inplace=True)
     best = df.head(1)
@@ -409,55 +314,145 @@ def get_best_results(path):
         value = hyperparams[column].values[0]
         print(f"- {name}: {value}")
 
-    return analysis.get_best_config()"""
+    return analysis.get_best_config()
 
 
 def save_model(model, config, path_weights, path_config):
     """Save trained torch weights with config"""
+
+    Path(path_weights).parent.mkdir(parents=True, exist_ok=True)
+
     torch.save(model.state_dict(), path_weights)
 
     with open(path_config, "w") as fp:
         json.dump(config, fp, indent=4)
 
 
+def plot_parallel_param_loss(
+    analysis,
+    cols=("bs", "lr", "channels", "hidden"),
+    cmap_name="plasma",
+    save_path="media/images/1_face_explore_parallel.png",
+):
+    """
+    Parallel-coords plot coloured by loss.
+    • numeric columns  → min-max normalised 0-1
+    • tuple / string   → encoded 0-1 evenly spaced
+    """
+    df   = analysis.dataframe()
+    cols = [c for c in cols if f"config/{c}" in df]
+    if not cols:
+        raise ValueError("None of the requested columns found in analysis")
 
-def predict_screen_errors( *img_types, path_model, path_config, path_plot=None, path_errors=None, data_partial=True, steps=10):
-    """Get prediction error for each screen coordinate
-    with open(path_config) as json_file:
-        config = json.load(json_file)
+    pc = df[[f"config/{c}" for c in cols] + ["loss"]].copy()
+    pc.columns = list(cols) + ["loss"]      # rename for easy access
 
-    if len(img_types) == 1:
-        model = SingleModel(config, img_types[0])
-    else:
-        model = FullModel(config)
+    # ---------- encode + normalise ---------------------------------------
+    tick_labels = {}
+    for c in cols:
+        series = pc[c]
 
-    model.load_state_dict(torch.load(path_model))
-    model.cuda()
-    model.eval()
+        # categorical?
+        if isinstance(series.iloc[0], (tuple, str)):
+            cats = series.astype(str).unique().tolist()
+            tick_labels[c] = cats
+            codes = series.astype(str).apply(cats.index).astype(float)
 
-    data = FaceDataset(Path.cwd(), data_partial, *img_types)
+            if len(cats) > 1:
+                pc[c] = codes / (len(cats) - 1)      # 0-1 scaling
+            else:                                    # single category
+                pc[c] = 0.5
+        else:
+            x = series.astype(float)
+            tick_labels[c] = np.linspace(x.min(), x.max(), 5)
+            rng = x.max() - x.min()
+            pc[c] = (x - x.min()) / (rng + 1e-9)
 
-    x = []
-    y = []
-    error = []
+    # ---------- colour setup ---------------------------------------------
+    loss = pc["loss"].astype(float)
+    norm = mpl.colors.Normalize(loss.min(), loss.max())
+    cmap = mpl.cm.get_cmap(cmap_name)
 
-    for i, d in tqdm(enumerate(data), total=len(data)):
-        if i % steps == 0:
-            img_list = [d[img].unsqueeze(0).cuda() for img in img_types]
+    # ---------- plot ------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(2.6*len(cols), 3),
+                           constrained_layout=True)
 
-            with torch.no_grad():
-                target = d["targets"].cuda()
-                predict = model(*img_list)[0]
-                dist = torch.sqrt(((predict - target) ** 2).sum(axis=0))
+    for _, row in pc.iterrows():
+        ax.plot(cols, row[cols],
+                color=cmap(norm(row["loss"])), alpha=0.7, linewidth=1)
 
-                x.append(target.cpu().numpy()[0])
-                y.append(target.cpu().numpy()[1])
-                error.append(float(dist.cpu().numpy()))
+    ax.set_ylabel("normalised 0-1")
+    ax.set_title("Hyper-parameter exploration – colour = val_loss")
+    ax.grid(True, axis="y", alpha=0.3)
 
-    print("Average error: {}px over {} predictions".format(round(np.mean(error), 2), len(error)))
-    errors = plot_screen_errors( x, y, error, path_plot=path_plot, path_errors=path_errors)
+    # put category labels / numeric ticks
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels(cols, rotation=30)
 
-    return errors"""
+    # numeric y-tick labels only once (left)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1])
+
+    # annotate categorical axes
+    for i, c in enumerate(cols):
+        if isinstance(pc[c].iloc[0], (tuple, str)):
+            cats = tick_labels[c]
+            ys   = np.linspace(0, 1, len(cats))
+            for y, txt in zip(ys, cats):
+                ax.text(i, y, txt, va="center", ha="right",
+                        fontsize=7, color="black",
+                        transform=ax.transData)
+
+    # colour-bar
+    sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+    plt.colorbar(sm, ax=ax, pad=0.01).set_label("val_loss")
+
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=120)
+    plt.show()
+    return Path(save_path)
+
+
+
+
+def plot_asha_param_grid(analysis,
+                         params=("bs","lr","channels","hidden"),
+                         save_path="media/images/1_face_explore_scatter.png",
+                         cmap_name="plasma"):
+
+    df   = analysis.dataframe()
+    loss = df["loss"].astype(float)
+    norm = mpl.colors.Normalize(loss.min(), loss.max())
+    cmap = mpl.cm.get_cmap(cmap_name)
+
+    # ★ enable smarter layout
+    fig, axes = plt.subplots(1, len(params),
+                             figsize=(2.1*len(params), 3.5),
+                             sharey=True,
+                             constrained_layout=True)
+
+    for ax, p in zip(axes, params):
+        col = f"config/{p}"
+        if col not in df: ax.set_visible(False); continue
+
+        x_raw = df[col]
+        if isinstance(x_raw.iloc[0], (tuple, str)):
+            cats = x_raw.astype(str).unique().tolist()
+            x = x_raw.astype(str).apply(cats.index)
+            ax.set_xticks(range(len(cats)))
+            ax.set_xticklabels(cats, rotation=60, fontsize=7)
+        else:
+            x = x_raw.astype(float)
+
+        ax.scatter(x, loss, c=cmap(norm(loss)),
+                   s=20, edgecolor="k", linewidth=.3, alpha=.8)
+        ax.set_xlabel(p, fontsize=8, rotation=25)
+        ax.grid(alpha=.3);  ax.spines[["top","right"]].set_visible(False)
+
+    axes[0].set_ylabel("val_loss"); axes[0].invert_yaxis()
+
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=120); plt.show()
+    return Path(save_path)
 
 
 def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
@@ -495,3 +490,36 @@ def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
     plt.show()
 
     return zi.T
+
+
+def predict_screen_errors(*img_types,
+                          path_model,
+                          path_config,
+                          path_plot=None,
+                          path_errors=None,
+                          steps=10):
+    from utils import _build_model        # already in namespace after import utils
+    from models import GazeDataset
+
+    with open(path_config) as fp:
+        cfg = json.load(fp)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model  = _build_model(cfg, img_types).to(device)
+    model.load_state_dict(torch.load(path_model, map_location=device))
+    model.eval()
+
+    ds = GazeDataset(Path.cwd()/"data", img_types, augment=False)
+
+    xs, ys, errs = [], [], []
+    for i, sample in tqdm(enumerate(ds), total=len(ds)):
+        if i % steps: continue
+        imgs   = [sample[t].unsqueeze(0).to(device) for t in img_types]
+        target = sample["targets"].to(device)
+        with torch.no_grad():
+            pred  = model(*imgs)[0]
+        dist = torch.linalg.vector_norm(pred - target)
+        xs.append(float(target[0])); ys.append(float(target[1])); errs.append(float(dist))
+
+    print(f"Average error: {np.mean(errs):.2f}px over {len(errs)} samples")
+    plot_screen_errors(xs, ys, errs, path_plot, path_errors)

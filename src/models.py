@@ -7,7 +7,6 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision import transforms
 import torchmetrics
@@ -21,12 +20,10 @@ __all__ = [
     "FullModel",
 ]
 
-# -----------------------------------------------------------------------------
-# 1. Dataset & DataModule
-# -----------------------------------------------------------------------------
+def _identity(img):
+    return img
 
 class GazeDataset(Dataset):
-    """Loads a single sample consisting of one or more cropped images + labels."""
 
     def __init__(
         self,
@@ -47,14 +44,11 @@ class GazeDataset(Dataset):
         self._targets = torch.tensor(df[["x", "y"]].values, dtype=torch.float32)
         self._head_angle = torch.tensor(df["head_angle"].values, dtype=torch.float32)
 
-        # Augment colour a bit for better robustness; skipped for head_pos mask.
         jitter = transforms.ColorJitter(0.3, 0.3, 0.3, 0.1)
-        self._transform = transforms.Compose([jitter if augment else transforms.Lambda(lambda x: x), transforms.ToTensor()])
+        # self._transform = transforms.Compose([jitter if augment else transforms.Lambda(lambda x: x), transforms.ToTensor()]) old one
+        self._transform = transforms.Compose([jitter if augment else transforms.Lambda(_identity), transforms.ToTensor()])
         self._to_tensor = transforms.ToTensor()
 
-    # ------------------------------------------------------------------
-    # PyTorch std. API
-    # ------------------------------------------------------------------
     def __len__(self):
         return len(self._files)
 
@@ -79,13 +73,11 @@ class GazeDataset(Dataset):
 
 
 class GazeDataModule(pl.LightningDataModule):
-    """Wraps *GazeDataset* in train/val/test DataLoaders."""
-
     def __init__(
         self,
         data_dir: Union[str, Path] = "data",
         batch_size: int = 128,
-        num_workers: int = 4,
+        num_workers: int = 8,
         train_prop: float = 0.8,
         val_prop: float = 0.1,
         img_types: Sequence[str] = ("l_eye", "r_eye", "head_angle"),
@@ -94,11 +86,9 @@ class GazeDataModule(pl.LightningDataModule):
         super().__init__()
         self.save_hyperparameters(logger=False)
 
-    # --------------------------------------------------------------
-    # Stage hooks
-    # --------------------------------------------------------------
+
     def setup(self, stage: str | None = None):
-        dataset = GazeDataset(self.hparams.data_dir, self.hparams.img_types)
+        dataset = GazeDataset(self.hparams.data_dir, self.hparams.img_types, augment = (stage == "fit"))
         n_total = len(dataset)
         n_train = int(n_total * self.hparams.train_prop)
         n_val = int(n_total * self.hparams.val_prop)
@@ -110,9 +100,6 @@ class GazeDataModule(pl.LightningDataModule):
             generator=torch.Generator().manual_seed(self.hparams.seed),
         )
 
-    # --------------------------------------------------------------
-    # DataLoaders
-    # --------------------------------------------------------------
     def train_dataloader(self):
         return DataLoader(
             self.ds_train,
@@ -143,12 +130,7 @@ class GazeDataModule(pl.LightningDataModule):
         )
 
 
-# -----------------------------------------------------------------------------
-# 2. Building blocks
-# -----------------------------------------------------------------------------
-
 def _conv_block(in_ch: int, out_ch: int, ks: int = 3) -> nn.Sequential:
-    """Conv‑BN‑ReLU‑Pool."""
     return nn.Sequential(
         nn.Conv2d(in_ch, out_ch, ks, padding=ks // 2, bias=False),
         nn.BatchNorm2d(out_ch),
@@ -168,11 +150,6 @@ class ConvStack(nn.Sequential):
         super().__init__(*layers)
         self.out_channels = c_curr
 
-
-# -----------------------------------------------------------------------------
-# 3. Lightning base class with common training logic
-# -----------------------------------------------------------------------------
-
 class _Base(pl.LightningModule):
     def __init__(self, lr: float = 3e-4):
         super().__init__()
@@ -180,31 +157,21 @@ class _Base(pl.LightningModule):
         self.criterion = nn.SmoothL1Loss()
         self.mae = torchmetrics.MeanAbsoluteError()
 
-    # --------------------------------------------
-    # Optim / sched
-    # --------------------------------------------
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
         return opt
 
-    # --------------------------------------------
-    # Helper for logging across stages
-    # --------------------------------------------
     def _shared_step(self, preds: torch.Tensor, targets: torch.Tensor, stage: str):
         loss = self.criterion(preds, targets)
         mae = self.mae(preds, targets)
-        self.log(f"{stage}_loss", loss, prog_bar=True)
-        self.log(f"{stage}_mae", mae, prog_bar=True)
+
+        self.log(f"{stage}_loss", loss, prog_bar=True, on_epoch=True, on_step=True)
+        self.log(f"{stage}_mae", mae, prog_bar=True, on_epoch=True, on_step=True)
+
         return loss
 
 
-# -----------------------------------------------------------------------------
-# 4. Model variants
-# -----------------------------------------------------------------------------
-
 class SingleModel(_Base):
-    """Simple CNN that takes *one* modality (e.g. face or head_pos)."""
-
     def __init__(
         self,
         img_type: str = "face_aligned",
@@ -223,9 +190,7 @@ class SingleModel(_Base):
         )
         self.example_input_array = torch.rand(1, 3, 64, 64)
 
-    # ----------------------------------------
-    # Forward / steps
-    # ----------------------------------------
+
     def forward(self, x):
         return self.regressor(self.backbone(x))
 
@@ -243,8 +208,6 @@ class SingleModel(_Base):
 
 
 class EyesModel(_Base):
-    """CNN that fuses **left + right eye** embeddings."""
-
     def __init__(
         self,
         lr: float = 3e-4,
@@ -263,7 +226,6 @@ class EyesModel(_Base):
         )
         self.example_input_array = [torch.rand(1, 3, 64, 64)] * 2
 
-    # ----------------------------------------
     def forward(self, l_eye, r_eye):
         l = self.l_stack(l_eye).flatten(start_dim=1)
         r = self.r_stack(r_eye).flatten(start_dim=1)
@@ -313,7 +275,6 @@ class FullModel(_Base):
             torch.rand(1),
         ]
 
-    # ----------------------------------------
     def forward(self, face, l_eye, r_eye, head_pos, head_angle):
         face_f = self.face_stack(face).flatten(start_dim=1)
         l_f = self.l_stack(l_eye).flatten(start_dim=1)
@@ -322,7 +283,6 @@ class FullModel(_Base):
         x = torch.cat([face_f, l_f, r_f, h_f, head_angle.unsqueeze(1)], dim=1)
         return self.regressor(x)
 
-    # ----------------------------------------
     def training_step(self, batch, batch_idx):
         preds = self(
             batch["face_aligned"],
