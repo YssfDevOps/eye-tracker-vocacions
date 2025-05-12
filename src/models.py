@@ -127,6 +127,7 @@ class GazeDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.hparams.num_workers,
             pin_memory=True,
+            persistent_workers=True,
         )
 
 
