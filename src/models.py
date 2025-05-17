@@ -4,7 +4,7 @@ from typing import Sequence, Union
 
 import pandas as pd
 from PIL import Image
-
+from torchmetrics import MeanSquaredError
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -54,22 +54,28 @@ class GazeDataset(Dataset):
 
     def __getitem__(self, idx: int):
         sample = {"targets": self._targets[idx]}
-
+    
+        # optional scalar
         if "head_angle" in self.img_types:
             sample["head_angle"] = self._head_angle[idx]
-
+    
         for t in self.img_types:
             if t == "head_angle":
-                continue
-
+                continue                                    # handled above
+            
             img_path = self.data_dir / t / self._files[idx]
             img = Image.open(img_path)
-
-            # Head‑pos mask is already 1‑channel B&W – no colour jitter.
-            tensor = self._to_tensor(img) if t == "head_pos" else self._transform(img)
+    
+            if t == "head_pos":                            # mask → 1-channel
+                img = img.convert("L")                     # force greyscale
+                tensor = self._to_tensor(img)              # 1 × 64 × 64
+            else:                                          # RGB inputs
+                tensor = self._transform(img)              # 3 × 64 × 64, with jitter
+    
             sample[t] = tensor
-
+    
         return sample
+
 
 
 class GazeDataModule(pl.LightningDataModule):
@@ -157,6 +163,8 @@ class _Base(pl.LightningModule):
         self.lr = lr
         self.criterion = nn.SmoothL1Loss()
         self.mae = torchmetrics.MeanAbsoluteError()
+        self.mse  = MeanSquaredError()
+        self.rmse = MeanSquaredError(squared=False)
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=1e-4)
@@ -166,8 +174,14 @@ class _Base(pl.LightningModule):
         loss = self.criterion(preds, targets)
         mae = self.mae(preds, targets)
 
+        mse_val = self.mse(preds, targets)
+        rmse_val = self.rmse(preds, targets)
+
         self.log(f"{stage}_loss", loss, prog_bar=True, on_epoch=True, on_step=True)
         self.log(f"{stage}_mae", mae, prog_bar=True, on_epoch=True, on_step=True)
+
+        self.log(f"{stage}_mse", mse_val, prog_bar=True, on_epoch=True, on_step=False)
+        self.log(f"{stage}_rmse", rmse_val, prog_bar=True, on_epoch=True, on_step=False)
 
         return loss
 

@@ -6,6 +6,7 @@
 data
 logs
 media
+trained_models
 
 # Python specific files
 __pycache__/

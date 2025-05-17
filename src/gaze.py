@@ -4,6 +4,12 @@ import queue
 import threading
 import numpy as np
 import mediapipe as mp
+import torch
+from pathlib import Path
+from torchvision import transforms
+from typing import Sequence
+from models import EyesModel, FullModel, SingleModel
+from utils import _build_model
 
 from utils import get_config, getLeftEye, getRightEye
 
@@ -49,8 +55,8 @@ class Detector:
 
         # Threaded webcam capture
         self.capture = cv2.VideoCapture(1, cv2.CAP_DSHOW)
-        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.capture.set(cv2.CAP_PROP_FPS, 30)
         self.q = queue.Queue()
         t = threading.Thread(target=self._reader)
@@ -204,6 +210,65 @@ class Detector:
         print("Closing face detector...")
         self.capture.release()
         cv2.destroyAllWindows()
+
+
+class Predictor:
+    def __init__(self,
+                 model_cls,
+                 model_path: str | Path,
+                 cfg_json: str | Path | None = None,
+                 gpu: int = 0):
+
+        self.device = (
+            torch.device(f"cuda:{gpu}") if gpu >= 0 and torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        model_path = Path(model_path)
+
+        # ── Lightning checkpoint (.ckpt) ────────────────────────────────
+        if model_path.suffix == ".ckpt":
+            self.model = model_cls.load_from_checkpoint(model_path).to(self.device)
+
+        # ── Plain state-dict (.pt) + JSON config ────────────────────────
+        else:
+            if cfg_json is None:
+                raise ValueError("cfg_json must be provided for .pt weights")
+            cfg = json.loads(Path(cfg_json).read_text())
+
+            # build correct architecture (Single / Eyes / Full)
+            img_types = cfg.get("img_types",
+                                ["face_aligned","l_eye","r_eye","head_pos","head_angle"])
+            self.model = _build_model(cfg, img_types).to(self.device)
+
+            state = torch.load(model_path, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(state, strict=True)
+
+        self.model.eval().half()                 # fp16/bf16 on GPU, fp32 on CPU
+        self.totensor = transforms.ToTensor()
+
+    # ------------------------------------------------------------------
+    def _prep_imgs(self, imgs: Sequence[np.ndarray]):
+        tensors = []
+        for im in imgs:
+            if im.dtype != np.uint8:
+                im = im.astype(np.uint8)
+            tensors.append(
+                self.totensor(im).unsqueeze(0).half().to(self.device)
+            )
+        return tensors
+
+    # ------------------------------------------------------------------
+    def predict(self, *imgs, head_angle: float | None = None):
+        tensors = self._prep_imgs(imgs)
+        if head_angle is not None:
+            tensors.append(
+                torch.tensor([head_angle], dtype=torch.float16, device=self.device)
+            )
+        with torch.no_grad():
+            xy = self.model(*tensors)[0].float().cpu().numpy()
+        return float(xy[0]), float(xy[1])
+
+
 
 
 if __name__ == "__main__":

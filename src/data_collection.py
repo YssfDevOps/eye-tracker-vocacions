@@ -5,12 +5,12 @@ import cv2
 import random
 import pygame
 import numpy as np
-
+from models import SingleModel, EyesModel, FullModel
 from collections import deque
 from scipy.stats import beta
 from pygame.locals import *
 from target import Target
-from gaze import Detector
+from gaze import Detector, Predictor
 from utils import (
     get_config,
     bgr_to_rgb,
@@ -58,6 +58,16 @@ target = Target(
     center, speed=SETTINGS["target_speed"], radius=SETTINGS["target_radius"]
 )
 detector = Detector(output_size=SETTINGS["image_size"])
+
+# cargar modelo entrenado de ojos
+predictor = Predictor(
+    FullModel,                               # clase correcta
+    model_path  = "trained_models/full/eyetracking_model.pt",
+    cfg_json    = "trained_models/full/eyetracking_config.json",
+    gpu         = 0,                         # −1 para CPU
+)
+screen_errors = np.load("trained_models/full/errors.npy")
+
 
 # Load array of previously collected screen regions
 try:
@@ -387,7 +397,43 @@ while True:
             collect_screen = False
 
     if track_screen:
-        pass
+        for event in pygame.event.get():
+            if event.type == pygame.VIDEORESIZE:
+                w, h = pygame.display.get_surface().get_size()
+            elif event.type == KEYDOWN and event.key == K_ESCAPE:
+                cleanup()
+            elif event.type == KEYDOWN and event.key == K_c:
+                show_webcam = not show_webcam
+            elif event.type == KEYDOWN and event.key == K_s:
+                show_stats = not show_stats
+            elif event.type == KEYDOWN and event.key == K_SPACE:
+                selection_screen = True
+                track_screen = False
+
+        # 1. inferencia ------------------------------------------------------
+        x_hat, y_hat = predictor.predict(face_align, l_eye, r_eye, head_pos, head_angle=angle)
+
+        print(f"predict →  x={x_hat:6.1f}   y={y_hat:6.1f}")
+
+        # 2. media móvil para suavizar --------------------------------------
+        track_x.append(x_hat)
+        track_y.append(y_hat)
+
+        # 3. error local (para radio del target) ----------------------------
+        x_clamp = clamp_value(int(x_hat), w - 1)
+        y_clamp = clamp_value(int(y_hat), h - 1)
+        local_err = screen_errors[x_clamp, y_clamp]
+        track_error.append(local_err * 0.75)
+
+        # 4. dibujar target --------------------------------------------------
+        weights_pos = np.arange(1, SETTINGS["avg_window_length"] + 1)
+        weights_err = np.arange(1, (SETTINGS["avg_window_length"] * 2) + 1)
+
+        target.x = np.average(track_x, weights=weights_pos) * 1.5
+        target.y = np.average(track_y, weights=weights_pos) * 1.5
+        target.radius = np.average(track_error, weights=weights_err)
+
+        target.render(screen)
 
     ticks = clock.tick(SETTINGS["record_frame_rate"])
     pygame.display.update()
