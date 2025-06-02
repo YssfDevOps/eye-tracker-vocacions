@@ -45,7 +45,6 @@ class GazeDataset(Dataset):
         self._head_angle = torch.tensor(df["head_angle"].values, dtype=torch.float32)
 
         jitter = transforms.ColorJitter(0.3, 0.3, 0.3, 0.1)
-        # self._transform = transforms.Compose([jitter if augment else transforms.Lambda(lambda x: x), transforms.ToTensor()]) old one
         self._transform = transforms.Compose([jitter if augment else transforms.Lambda(_identity), transforms.ToTensor()])
         self._to_tensor = transforms.ToTensor()
 
@@ -61,16 +60,16 @@ class GazeDataset(Dataset):
     
         for t in self.img_types:
             if t == "head_angle":
-                continue                                    # handled above
+                continue
             
             img_path = self.data_dir / t / self._files[idx]
             img = Image.open(img_path)
     
-            if t == "head_pos":                            # mask → 1-channel
-                img = img.convert("L")                     # force greyscale
-                tensor = self._to_tensor(img)              # 1 × 64 × 64
-            else:                                          # RGB inputs
-                tensor = self._transform(img)              # 3 × 64 × 64, with jitter
+            if t == "head_pos":
+                img = img.convert("L")
+                tensor = self._to_tensor(img)
+            else:
+                tensor = self._transform(img)
     
             sample[t] = tensor
     
@@ -153,7 +152,7 @@ class ConvStack(nn.Sequential):
         for c_next in channels:
             layers.append(_conv_block(c_curr, c_next, ks))
             c_curr = c_next
-        layers.append(nn.AdaptiveAvgPool2d(1))  # (B, c_curr, 1, 1)
+        layers.append(nn.AdaptiveAvgPool2d(1))
         super().__init__(*layers)
         self.out_channels = c_curr
 

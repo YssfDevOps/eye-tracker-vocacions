@@ -225,17 +225,14 @@ class Predictor:
         )
         model_path = Path(model_path)
 
-        # ── Lightning checkpoint (.ckpt) ────────────────────────────────
         if model_path.suffix == ".ckpt":
             self.model = model_cls.load_from_checkpoint(model_path).to(self.device)
-
-        # ── Plain state-dict (.pt) + JSON config ────────────────────────
         else:
             if cfg_json is None:
                 raise ValueError("cfg_json must be provided for .pt weights")
             cfg = json.loads(Path(cfg_json).read_text())
 
-            # build correct architecture (Single / Eyes / Full)
+            # build architecture Single/Eyes/Full
             img_types = cfg.get("img_types",
                                 ["face_aligned","l_eye","r_eye","head_pos","head_angle"])
             self.model = _build_model(cfg, img_types).to(self.device)
@@ -243,10 +240,9 @@ class Predictor:
             state = torch.load(model_path, map_location="cpu", weights_only=False)
             self.model.load_state_dict(state, strict=True)
 
-        self.model.eval().half()                 # fp16/bf16 on GPU, fp32 on CPU
+        self.model.eval().half()
         self.totensor = transforms.ToTensor()
 
-    # ------------------------------------------------------------------
     def _prep_imgs(self, imgs: Sequence[np.ndarray]):
         tensors = []
         for im in imgs:
@@ -257,7 +253,6 @@ class Predictor:
             )
         return tensors
 
-    # ------------------------------------------------------------------
     def predict(self, *imgs, head_angle: float | None = None):
         tensors = self._prep_imgs(imgs)
         if head_angle is not None:
@@ -269,15 +264,13 @@ class Predictor:
         return float(xy[0]), float(xy[1])
 
 
-
-
 if __name__ == "__main__":
     detector = Detector(
         output_size=512, show_stream=False, show_output=True, show_markers=False
     )
 
     while True:
-        if cv2.waitKey(1) & 0xFF == 27:  # wait for escape key
+        if cv2.waitKey(1) & 0xFF == 27:  # Esc key to exit
             break
         detector.get_frame()
 

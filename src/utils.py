@@ -334,11 +334,6 @@ def plot_parallel_param_loss(
     cmap_name="plasma",
     save_path="media/images/1_face_explore_parallel.png",
 ):
-    """
-    Parallel-coords plot coloured by loss.
-    • numeric columns  → min-max normalised 0-1
-    • tuple / string   → encoded 0-1 evenly spaced
-    """
     df   = analysis.dataframe()
     cols = [c for c in cols if f"config/{c}" in df]
     if not cols:
@@ -347,7 +342,6 @@ def plot_parallel_param_loss(
     pc = df[[f"config/{c}" for c in cols] + ["loss"]].copy()
     pc.columns = list(cols) + ["loss"]      # rename for easy access
 
-    # ---------- encode + normalise ---------------------------------------
     tick_labels = {}
     for c in cols:
         series = pc[c]
@@ -359,8 +353,8 @@ def plot_parallel_param_loss(
             codes = series.astype(str).apply(cats.index).astype(float)
 
             if len(cats) > 1:
-                pc[c] = codes / (len(cats) - 1)      # 0-1 scaling
-            else:                                    # single category
+                pc[c] = codes / (len(cats) - 1)
+            else:
                 pc[c] = 0.5
         else:
             x = series.astype(float)
@@ -368,12 +362,10 @@ def plot_parallel_param_loss(
             rng = x.max() - x.min()
             pc[c] = (x - x.min()) / (rng + 1e-9)
 
-    # ---------- colour setup ---------------------------------------------
     loss = pc["loss"].astype(float)
     norm = mpl.colors.Normalize(loss.min(), loss.max())
     cmap = mpl.cm.get_cmap(cmap_name)
 
-    # ---------- plot ------------------------------------------------------
     fig, ax = plt.subplots(figsize=(2.6*len(cols), 3),
                            constrained_layout=True)
 
@@ -402,7 +394,6 @@ def plot_parallel_param_loss(
                         fontsize=7, color="black",
                         transform=ax.transData)
 
-    # colour-bar
     sm = mpl.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
     plt.colorbar(sm, ax=ax, pad=0.01).set_label("val_loss")
 
