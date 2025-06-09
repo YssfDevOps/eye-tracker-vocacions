@@ -15,6 +15,7 @@ from utils import get_config, getLeftEye, getRightEye
 
 # Read config.ini file
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
+SCALE_X = 1.2
 
 class Detector:
     def __init__(self, output_size, show_stream=False, show_markers=False, show_output=False):
@@ -241,15 +242,30 @@ class Predictor:
             self.model.load_state_dict(state, strict=True)
 
         self.model.eval().half()
-        self.totensor = transforms.ToTensor()
+        self.to_tensor = transforms.ToTensor()
 
-    def _prep_imgs(self, imgs: Sequence[np.ndarray]):
+    @staticmethod
+    def _bgr2rgb(img: np.ndarray) -> np.ndarray:
+        """OpenCV → PIL colour order with positive strides."""
+        if img.ndim == 3 and img.shape[2] == 3:
+            return img[..., ::-1].copy()  # ← .copy() removes neg-stride
+        return img
+
+    def _prep_imgs(self, imgs):
         tensors = []
-        for im in imgs:
+        for idx, im in enumerate(imgs):
+            im = self._bgr2rgb(im)
+
+            # head-pos mask → 1-channel
+            if idx == 3:  # adjust if ordering differs
+                if im.ndim == 3:
+                    im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+
             if im.dtype != np.uint8:
                 im = im.astype(np.uint8)
+
             tensors.append(
-                self.totensor(im).unsqueeze(0).half().to(self.device)
+                self.to_tensor(im).unsqueeze(0).half().to(self.device)
             )
         return tensors
 
@@ -261,6 +277,8 @@ class Predictor:
             )
         with torch.no_grad():
             xy = self.model(*tensors)[0].float().cpu().numpy()
+            xy[0] = xy[0] * SCALE_X
+
         return float(xy[0]), float(xy[1])
 
 

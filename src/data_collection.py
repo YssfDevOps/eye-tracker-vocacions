@@ -410,24 +410,31 @@ while True:
                 selection_screen = True
                 track_screen = False
 
-        x_hat, y_hat = predictor.predict(face_align, l_eye, r_eye, head_pos, head_angle=angle)
+        x_hat, y_hat = predictor.predict(
+            face_align, l_eye, r_eye, head_pos, head_angle=angle
+        )
+        print(f"[raw]  x={x_hat:7.1f}   y={y_hat:7.1f}")
 
-        print(f"predict →  x={x_hat:6.1f}   y={y_hat:6.1f}")
-
+        # keep a rolling window
         track_x.append(x_hat)
         track_y.append(y_hat)
 
+        # ----- error radius (optional visual feedback) ---------------------
         x_clamp = clamp_value(int(x_hat), w - 1)
         y_clamp = clamp_value(int(y_hat), h - 1)
-        local_err = screen_errors[x_clamp, y_clamp]
-        track_error.append(local_err * 0.75)
+        err_px = screen_errors[x_clamp, y_clamp] * 0.75
+        track_error.append(err_px)
 
+        # ----- exponential-like smoothing ----------------------------------
         weights_pos = np.arange(1, SETTINGS["avg_window_length"] + 1)
         weights_err = np.arange(1, (SETTINGS["avg_window_length"] * 2) + 1)
 
         target.x = np.average(track_x, weights=weights_pos)
         target.y = np.average(track_y, weights=weights_pos)
         target.radius = np.average(track_error, weights=weights_err)
+
+        target.x = max(0, min(target.x, w - 1))
+        target.y = max(0, min(target.y, h - 1))
 
         target.render(screen)
 
