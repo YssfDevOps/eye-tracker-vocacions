@@ -13,36 +13,18 @@ from gaze   import Detector, Predictor
 from models import FullModel
 from utils  import get_config, clamp_value
 
-# ----------------------------------------------------------------------
-# 0  Config & helpers
-# ----------------------------------------------------------------------
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
 def _weighted_avg(buf: Sequence[float], weights: np.ndarray) -> float:
-    """Compute ∑w·x / ∑w (expects len(buf) == len(weights))."""
     return float(np.sum(np.array(buf) * weights) / weights.sum())
-
-def get_primary_monitor():
-    """Always capture the *first* non-virtual monitor (index = 1 in mss)."""
-    with mss.mss() as sct:
-        mon = sct.monitors[1]          # monitors[0] is a fake full-desktop entry
-    return {k: mon[k] for k in ("top", "left", "width", "height")}
 
 def _setup_monitor(monitors: list[dict], idx: int) -> Tuple[dict, int, int]:
     mon = monitors[idx]
     w, h = mon["width"], mon["height"]
-    # mss expects exactly these four keys ↓
     monitor = {"top": mon["top"], "left": mon["left"], "width": w, "height": h}
     return monitor, w, h
 
-def clamp(i: int, lo: int, hi: int) -> int:
-    return max(lo, min(i, hi))
-
-# ----------------------------------------------------------------------
-# 1  Main loop
-# ----------------------------------------------------------------------
-def main():
-    # ── prepare predictors ────────────────────────────────────────────
+def tracker():
     detector  = Detector(output_size=SETTINGS["image_size"])
     predictor = Predictor(
         FullModel,
@@ -61,11 +43,9 @@ def main():
     w_pos     = np.arange(1, win_pos+1)
     w_err     = np.arange(1, win_err+1)
 
-    # ── screen capture init ───────────────────────────────────────────
     with mss.mss() as sct:
         monitor, scr_w, scr_h = _setup_monitor(sct.monitors, EYETRACKER["monitor_num"])
 
-        # optional recording ------------------------------------------------
         writer = None
         if EYETRACKER["write_to_disk"]:
             fourcc = cv2.VideoWriter_fourcc(*"avc1")  # h264 on Win
@@ -77,7 +57,6 @@ def main():
                                      EYETRACKER["tracker_frame_rate"],
                                      out_sz)
 
-        # ── realtime loop ─────────────────────────────────────────────
         last = time.time()
         while True:
             if cv2.waitKey(1) & 0xFF == 27:          # ESC quits
@@ -85,16 +64,14 @@ def main():
 
             now = time.time()
             if now - last < 1/EYETRACKER["tracker_frame_rate"]:
-                continue            # throttle to requested FPS
+                continue
             fps = 1 / (now - last)
             last = now
 
-            # -------- camera inference
             l_eye, r_eye, face, face_al, head_pos, head_ang = detector.get_frame()
             x_pred, y_pred = predictor.predict(face_al, l_eye, r_eye,
                                                head_pos, head_angle=head_ang)
 
-            # -------- smoothing
             track_x.append(x_pred)
             track_y.append(y_pred)
             x_cl = clamp_value(int(x_pred), scr_w-1)
@@ -105,7 +82,6 @@ def main():
             y_vis = _weighted_avg(track_y, w_pos)
             rad   = _weighted_avg(track_err, w_err)
 
-            # -------- grab screen + draw
             frame   = np.array(sct.grab(monitor))
             overlay = frame.copy()
             centre  = (int(x_vis), int(y_vis))
@@ -114,16 +90,11 @@ def main():
             cv2.circle(frame,   centre, int(rad), COLOURS["green"], 4)
             frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
 
-            #  fps + raw coords text
             cv2.putText(frame, f"fps {fps:5.1f}", (10,30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOURS["green"], 2)
             cv2.putText(frame, f"({x_pred:4.0f},{y_pred:4.0f})", (10,60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOURS["green"], 2)
 
-            # optional webcam thumbnails (same as your original code) …———
-            # ---------------------------------------------------------------
-
-            # resize for view / video
             frame = cv2.resize(frame,
                                (int(scr_w*EYETRACKER["screen_capture_scale"]),
                                 int(scr_h*EYETRACKER["screen_capture_scale"])))
@@ -136,4 +107,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    tracker()
