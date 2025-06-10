@@ -48,7 +48,7 @@ def tracker():
 
         writer = None
         if EYETRACKER["write_to_disk"]:
-            fourcc = cv2.VideoWriter_fourcc(*"avc1")  # h264 on Win
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # h264 on Win
             dt_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             out_sz = (int(scr_w*EYETRACKER["screen_capture_scale"]),
                       int(scr_h*EYETRACKER["screen_capture_scale"]))
@@ -58,6 +58,9 @@ def tracker():
                                      out_sz)
 
         last = time.time()
+        cv2.namedWindow("Eye-tracker", cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(
+            "Eye-tracker",cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         while True:
             if cv2.waitKey(1) & 0xFF == 27:          # ESC quits
                 break
@@ -80,6 +83,8 @@ def tracker():
 
             x_vis = _weighted_avg(track_x, w_pos)
             y_vis = _weighted_avg(track_y, w_pos)
+            x_vis = clamp_value(int(x_vis), scr_w-1)
+            y_vis = clamp_value(int(y_vis), scr_h-1)
             rad   = _weighted_avg(track_err, w_err)
 
             frame   = np.array(sct.grab(monitor))
