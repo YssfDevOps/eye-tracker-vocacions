@@ -8,10 +8,11 @@ import cv2, mss
 import numpy as np
 import torch
 from torchvision import transforms
-
+import os
 from gaze   import Detector, Predictor
 from models import FullModel
-from utils  import get_config, clamp_value
+from utils  import get_config, clamp_value, plot_trajectory
+import keyboard
 
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
 
@@ -43,8 +44,18 @@ def tracker():
     w_pos     = np.arange(1, win_pos+1)
     w_err     = np.arange(1, win_err+1)
 
+    is_recording = False
+    record_pending = False
+    traj_points = []
+    screenshot_img = None
+
     with mss.mss() as sct:
         monitor, scr_w, scr_h = _setup_monitor(sct.monitors, EYETRACKER["monitor_num"])
+
+        def on_toggle():
+            nonlocal record_pending
+            record_pending = True
+        keyboard.add_hotkey('r', on_toggle)
 
         writer = None
         if EYETRACKER["write_to_disk"]:
@@ -66,8 +77,21 @@ def tracker():
         """---------------------------"""
 
         while True:
-            if cv2.waitKey(1) & 0xFF == 27:          # ESC quits
+            if cv2.waitKey(1) & 0xFF == 27:
                 break
+
+            if record_pending:
+                record_pending = False
+                if not is_recording:
+                    is_recording = True
+                    traj_points = []
+                    screenshot_img = np.array(sct.grab(monitor))
+                    print("[*] Started recording trajectory")
+                else:
+                    is_recording = False
+                    out_path = plot_trajectory(screenshot_img, traj_points)
+                    print(f"[+] Trajectory saved in {out_path}")
+
 
             now = time.time()
             if now - last < 1/EYETRACKER["tracker_frame_rate"]:
@@ -91,6 +115,9 @@ def tracker():
             y_vis = clamp_value(int(y_vis), scr_h-1)
             rad   = _weighted_avg(track_err, w_err)
 
+            if is_recording:
+                traj_points.append((x_vis, y_vis))
+
             frame   = np.array(sct.grab(monitor))
             overlay = frame.copy()
             centre  = (int(x_vis), int(y_vis))
@@ -98,6 +125,12 @@ def tracker():
             cv2.circle(overlay, centre, int(rad), (255,255,255,60), -1)
             cv2.circle(frame,   centre, int(rad), COLOURS["green"], 4)
             frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
+
+            text = "Currently recording trajectory! Press R to stop!" if is_recording else "Press R to record trajectory"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+            tx = (frame.shape[1] - tw) // 2
+            ty = frame.shape[0] - 20
+            cv2.putText(frame, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOURS["green"], 2)
 
             cv2.putText(frame, f"fps {fps:5.1f}", (10,30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOURS["green"], 2)
