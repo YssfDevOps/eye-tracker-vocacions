@@ -12,9 +12,7 @@ from ray.tune import ExperimentAnalysis
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mediapipe as mp
-import pandas as pd
 from scipy.interpolate import griddata
-from pandas.plotting import parallel_coordinates
 from tqdm.auto import tqdm
 import numpy as np
 import pytorch_lightning as pl
@@ -32,6 +30,7 @@ from models import (
 import os
 import cv2
 from typing import Tuple
+from models import GazeDataset
 
 mp_drawing = mp.solutions.drawing_utils
 mp_face_mesh = mp.solutions.face_mesh
@@ -406,8 +405,6 @@ def plot_parallel_param_loss(
     return Path(save_path)
 
 
-
-
 def plot_asha_param_grid(analysis,
                          params=("bs","lr","channels","hidden"),
                          save_path="media/images/1_face_explore_scatter.png",
@@ -486,15 +483,7 @@ def plot_screen_errors(x, y, z, path_plot=None, path_errors=None):
     return zi.T
 
 
-def predict_screen_errors(*img_types,
-                          path_model,
-                          path_config,
-                          path_plot=None,
-                          path_errors=None,
-                          steps=10):
-    from utils import _build_model        # already in namespace after import utils
-    from models import GazeDataset
-
+def predict_screen_errors(*img_types, path_model, path_config, path_plot=None, path_errors=None, steps=10):
     with open(path_config) as fp:
         cfg = json.load(fp)
 
@@ -508,7 +497,7 @@ def predict_screen_errors(*img_types,
     xs, ys, errs = [], [], []
     for i, sample in tqdm(enumerate(ds), total=len(ds)):
         if i % steps: continue
-        imgs   = [sample[t].unsqueeze(0).to(device) for t in img_types]
+        imgs = [sample[t].unsqueeze(0).to(device) for t in img_types]
         target = sample["targets"].to(device)
         with torch.no_grad():
             pred  = model(*imgs)[0]

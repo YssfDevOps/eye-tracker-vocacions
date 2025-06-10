@@ -1,14 +1,10 @@
-import time, json
+import time
 from datetime import datetime
 from pathlib import Path
 from collections import deque
 from typing import Tuple, Sequence
-
 import cv2, mss
 import numpy as np
-import torch
-from torchvision import transforms
-import os
 from gaze   import Detector, Predictor
 from models import FullModel
 from utils  import get_config, clamp_value, plot_trajectory

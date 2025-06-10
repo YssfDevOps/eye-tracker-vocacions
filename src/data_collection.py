@@ -5,7 +5,7 @@ import cv2
 import random
 import pygame
 import numpy as np
-from models import SingleModel, EyesModel, FullModel
+from models import FullModel
 from collections import deque
 from scipy.stats import beta
 from pygame.locals import *

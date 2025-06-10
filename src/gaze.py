@@ -7,8 +7,6 @@ import mediapipe as mp
 import torch
 from pathlib import Path
 from torchvision import transforms
-from typing import Sequence
-from models import EyesModel, FullModel, SingleModel
 from utils import _build_model
 
 from utils import get_config, getLeftEye, getRightEye
