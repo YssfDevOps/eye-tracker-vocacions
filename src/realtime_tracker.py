@@ -58,9 +58,13 @@ def tracker():
                                      out_sz)
 
         last = time.time()
+
+        """Delete this part before sending code"""
         cv2.namedWindow("Eye-tracker", cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(
             "Eye-tracker",cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        """---------------------------"""
+
         while True:
             if cv2.waitKey(1) & 0xFF == 27:          # ESC quits
                 break
