@@ -27,7 +27,7 @@ def tracker():
         FullModel,
         model_path = Path("trained_models/full/eyetracking_model.pt"),
         cfg_json   = Path("trained_models/full/eyetracking_config.json"),
-        gpu        = 0,          # −1 → force CPU
+        gpu        = 0,
     )
     screen_err = np.load("trained_models/full/errors.npy")
 
@@ -55,7 +55,7 @@ def tracker():
 
         writer = None
         if EYETRACKER["write_to_disk"]:
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # h264 on Win
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             dt_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             out_sz = (int(scr_w*EYETRACKER["screen_capture_scale"]),
                       int(scr_h*EYETRACKER["screen_capture_scale"]))

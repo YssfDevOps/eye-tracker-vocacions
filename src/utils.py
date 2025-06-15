@@ -517,7 +517,7 @@ def plot_trajectory(screenshot: np.ndarray,
     plt.figure(figsize=(img.shape[1]/100, img.shape[0]/100), dpi=100)
     plt.imshow(img)
     xs, ys = zip(*points) if points else ([], [])
-    plt.plot(xs, ys, marker='o', markersize=4, linewidth=2)
+    plt.plot(xs, ys, marker='o', markersize=4, linewidth=2, color='red')
     plt.axis('off')
 
     filename = f"trajectory_{len(os.listdir(out_dir))+1:03d}.png"

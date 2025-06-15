@@ -419,13 +419,13 @@ while True:
         track_x.append(x_hat)
         track_y.append(y_hat)
 
-        # ----- error radius (optional visual feedback) ---------------------
+        # error radius
         x_clamp = clamp_value(int(x_hat), w - 1)
         y_clamp = clamp_value(int(y_hat), h - 1)
         err_px = screen_errors[x_clamp, y_clamp] * 0.75
         track_error.append(err_px)
 
-        # ----- exponential-like smoothing ----------------------------------
+        # exponential smoothing
         weights_pos = np.arange(1, SETTINGS["avg_window_length"] + 1)
         weights_err = np.arange(1, (SETTINGS["avg_window_length"] * 2) + 1)
 
