@@ -13,7 +13,7 @@ from utils import get_config, getLeftEye, getRightEye
 
 # Read config.ini file
 SETTINGS, COLOURS, EYETRACKER, TF = get_config("config.ini")
-SCALE_X = 1.25
+SCALE_X = 1
 
 class Detector:
     def __init__(self, output_size, show_stream=False, show_markers=False, show_output=False):
