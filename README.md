@@ -118,6 +118,6 @@ cp src/notebooks/*.ipynb src/
 This project is licensed under the **MIT License**.
 
 ## Contact
-For questions or suggestions, reach out via GitHub Issues or email at **your-email@example.com**.
+For questions or suggestions, reach out via GitHub Issues.
 
 ---
