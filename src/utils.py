@@ -511,13 +511,26 @@ def predict_screen_errors(*img_types, path_model, path_config, path_plot=None, p
 def plot_trajectory(screenshot: np.ndarray,
                     points: Sequence[Tuple[int,int]],
                     out_dir: str = "media/trajectories") -> str:
+
     os.makedirs(out_dir, exist_ok=True)
     img = cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)
 
     plt.figure(figsize=(img.shape[1]/100, img.shape[0]/100), dpi=100)
     plt.imshow(img)
-    xs, ys = zip(*points) if points else ([], [])
-    plt.plot(xs, ys, marker='o', markersize=4, linewidth=2, color='red')
+
+    if points:
+        xs, ys = zip(*points)
+        # draw the trajectory line in light gray
+        plt.plot(xs, ys, linewidth=2, color='lightgray')
+        # draw intermediate points in red
+        plt.scatter(xs, ys, s=16, color='red', zorder=2)
+        # first point in green
+        plt.scatter([xs[0]], [ys[0]], s=64, color='green', marker='o', zorder=3, label='Start')
+        # last point in blue
+        plt.scatter([xs[-1]], [ys[-1]], s=64, color='blue', marker='o', zorder=3, label='End')
+        # optional legend
+        plt.legend(loc='upper right')
+
     plt.axis('off')
 
     filename = f"trajectory_{len(os.listdir(out_dir))+1:03d}.png"
@@ -525,4 +538,5 @@ def plot_trajectory(screenshot: np.ndarray,
     plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
     plt.close()
     return out_path
+
 
